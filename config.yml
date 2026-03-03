@@ -1,0 +1,81 @@
+login:
+  profile_path: chrome_profiles/facebook
+  profile_name: Default
+  cookies_file: cookies.txt
+  user_agents_file: user_agents.txt
+  proxies_file: proxies.txt
+
+crawl:
+  pages_file: pages.txt
+  output_file: output/pages_data.json
+  page_wait_seconds: 4
+  field_timeout: 25
+
+fields:
+  - name: page_name
+    by: xpath
+    selector: "(//h1[contains(@class,'html-h1')])[1]"
+    attribute: text
+    wait_until: visible
+
+  - name: followers
+    by: xpath
+    selector: "(//a[contains(@href,'/followers')]/strong)[1]"
+    attribute: text
+    optional: true
+    wait_until: visible
+
+  - name: following
+    by: xpath
+    selector: "((//a[contains(@href,'/following')]/strong)[1] | (//a[contains(@href,'/friends_likes')]/strong)[1])"
+    attribute: text
+    optional: true
+    wait_until: visible
+
+  - name: intro_title
+    by: xpath
+    selector: "(//h2[.//span[normalize-space()='Intro' or normalize-space()='Giới thiệu']])[1]"
+    attribute: text
+    optional: true
+    wait_until: visible
+
+  - name: intro_text_block
+    by: xpath
+    selector: "((//h2[.//span[normalize-space()='Intro' or normalize-space()='Giới thiệu']]/ancestor::div[1]/following::div[.//a[contains(@href,'l.facebook.com/l.php?u=')] and .//br][1]) | (//a[contains(@href,'l.facebook.com/l.php?u=')]/ancestor::div[1])[1])"
+    attribute: text
+    optional: true
+    wait_until: visible
+
+  - name: intro_external_links
+    by: xpath
+    selector: "((//h2[.//span[normalize-space()='Intro' or normalize-space()='Giới thiệu']]/ancestor::div[1]/following::a[contains(@href,'l.facebook.com/l.php?u=')]) | //a[contains(@href,'l.facebook.com/l.php?u=')])"
+    attribute: href
+    multiple: true
+    optional: true
+
+  - name: intro_contact_items
+    by: xpath
+    selector: "((//h2[.//span[normalize-space()='Intro' or normalize-space()='Giới thiệu']]/ancestor::div[1]/following::ul[1]//span[@dir='auto' and normalize-space()]) | (//ul//span[@dir='auto' and normalize-space()]))"
+    attribute: text
+    multiple: true
+    optional: true
+
+  - name: intro_link_items
+    by: xpath
+    selector: "((//h2[.//span[normalize-space()='Intro' or normalize-space()='Giới thiệu']]/ancestor::div[1]/following::ul[1]//a[@role='link']//span[@dir='auto' and normalize-space()]) | (//a[@role='link']//span[@dir='auto' and normalize-space()]))"
+    attribute: text
+    multiple: true
+    optional: true
+
+  - name: review_summary
+    by: xpath
+    selector: "((//a[contains(@href,'/reviews')]//span[@dir='auto' and (contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'recommend') or contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'review') or contains(.,'đề xuất') or contains(.,'đánh giá'))][1]) | (//a[contains(@href,'/reviews')]//span[@dir='auto' and normalize-space()][1]))"
+    attribute: text
+    optional: true
+    wait_until: visible
+
+  - name: final_url
+    attribute: current_url
+
+  - name: page_title
+    attribute: driver_title
