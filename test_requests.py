@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional
 
+import requests
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import InvalidCookieDomainException
@@ -241,7 +242,6 @@ def build_driver(
     profile_path: str,
     profile_name: str,
     user_agent: Optional[str],
-    proxy: Optional[str],
 ) -> webdriver.Chrome:
     options = Options()
     # Nếu biến môi trường HEADLESS = "true" thì chạy Chrome ở chế độ headless
@@ -272,11 +272,6 @@ def build_driver(
     # Thường dùng để giả lập mobile, hoặc tránh bị detect bot
     if user_agent:
         options.add_argument(f"--user-agent={user_agent}")
-
-    # Nếu có proxy thì cấu hình Chrome sử dụng proxy đó
-    # Format thường: http://host:port hoặc socks5://host:port
-    if proxy:
-        options.add_argument(f"--proxy-server={proxy}")
 
     # Lấy đường dẫn Chrome binary từ biến môi trường
     # Dùng khi máy có nhiều version Chrome hoặc chạy trong Docker
@@ -334,10 +329,50 @@ def describe_attempt(attempt: LoginAttempt) -> str:
     return f"proxy={proxy} | user-agent={user_agent}"
 
 
+def normalize_proxy_url(proxy: str) -> str:
+    if "://" in proxy:
+        return proxy
+    return f"http://{proxy}"
+
+
+def build_requests_proxies(proxy: str) -> dict:
+    normalized_proxy = normalize_proxy_url(proxy)
+    return {"http": normalized_proxy, "https": normalized_proxy}
+
+
+def build_requests_cookies(cookies: List[dict]) -> dict:
+    return {
+        str(cookie["name"]): str(cookie["value"])
+        for cookie in cookies
+        if cookie.get("name") and cookie.get("value") is not None
+    }
+
+
+def preflight_proxy_with_requests(attempt: LoginAttempt, cookies: List[dict]) -> Optional[float]:
+    if not attempt.proxy:
+        return None
+
+    headers = {}
+    if attempt.user_agent:
+        headers["User-Agent"] = attempt.user_agent
+
+    started_at = time.perf_counter()
+    response = requests.get(
+        FACEBOOK_URL,
+        headers=headers,
+        cookies=build_requests_cookies(cookies),
+        proxies=build_requests_proxies(attempt.proxy),
+        timeout=20,
+    )
+    response.raise_for_status()
+    return time.perf_counter() - started_at
+
+
 def try_login_with_existing_profile(
     profile_path: str,
     profile_name: str,
     attempt: LoginAttempt,
+    cookies: List[dict],
     index: int,
     total: int,
 ) -> bool:
@@ -353,21 +388,31 @@ def try_login_with_existing_profile(
     print(f"[{index}/{total}] Reusing profile -> {description}")
 
     driver = None
+    attempt_started_at = time.perf_counter()
     try:
+        proxy_preflight_seconds = preflight_proxy_with_requests(attempt, cookies)
+        if proxy_preflight_seconds is not None:
+            logging.info("Proxy preflight via requests OK | %s | %.3fs", description, proxy_preflight_seconds)
+            print(f"  -> Proxy preflight via requests: {proxy_preflight_seconds:.2f}s")
+
         driver = build_driver(
             profile_path=profile_path,
             profile_name=profile_name,
             user_agent=attempt.user_agent,
-            proxy=attempt.proxy,
         )
         open_facebook(driver)
         success = is_logged_in(driver)
+        login_duration_seconds = time.perf_counter() - attempt_started_at
         if success:
-            logging.info("SUCCESS | Existing profile | %s", description)
-            print("  -> Logged in by saved profile")
+            logging.info("SUCCESS | Existing profile | %s | %.3fs", description, login_duration_seconds)
+            print(f"  -> Logged in by saved profile in {login_duration_seconds:.2f}s")
         else:
-            logging.warning("FAILED | Existing profile not logged in | %s", description)
-            print("  -> Saved profile is not logged in")
+            logging.warning(
+                "FAILED | Existing profile not logged in | %s | %.3fs",
+                description,
+                login_duration_seconds,
+            )
+            print(f"  -> Saved profile is not logged in after {login_duration_seconds:.2f}s")
         return success
     except Exception as exc:
         logging.exception("ERROR | Existing profile | %s | %s", description, exc)
@@ -398,23 +443,33 @@ def login_and_persist_profile(
     print(f"[{index}/{total}] Cookie login -> {description}")
 
     driver = None
+    attempt_started_at = time.perf_counter()
     try:
+        proxy_preflight_seconds = preflight_proxy_with_requests(attempt, cookies)
+        if proxy_preflight_seconds is not None:
+            logging.info("Proxy preflight via requests OK | %s | %.3fs", description, proxy_preflight_seconds)
+            print(f"  -> Proxy preflight via requests: {proxy_preflight_seconds:.2f}s")
+
         driver = build_driver(
             profile_path=profile_path,
             profile_name=profile_name,
             user_agent=attempt.user_agent,
-            proxy=attempt.proxy,
         )
         login_with_cookies(driver, cookies)
         success = is_logged_in(driver)
+        login_duration_seconds = time.perf_counter() - attempt_started_at
 
         if success:
-            logging.info("SUCCESS | Cookie login persisted | %s", description)
-            print("  -> Cookie login successful")
+            logging.info("SUCCESS | Cookie login persisted | %s | %.3fs", description, login_duration_seconds)
+            print(f"  -> Cookie login successful in {login_duration_seconds:.2f}s")
             time.sleep(5)
         else:
-            logging.warning("FAILED | Cookie login did not create session | %s", description)
-            print("  -> Cookie login failed")
+            logging.warning(
+                "FAILED | Cookie login did not create session | %s | %.3fs",
+                description,
+                login_duration_seconds,
+            )
+            print(f"  -> Cookie login failed after {login_duration_seconds:.2f}s")
 
         return success
     except Exception as exc:
@@ -438,7 +493,6 @@ def create_authenticated_driver(
         profile_path=profile_path,
         profile_name=profile_name,
         user_agent=attempt.user_agent,
-        proxy=attempt.proxy,
     )
 
     try:
@@ -535,6 +589,7 @@ def main() -> None:
                 profile_path=profile_path,
                 profile_name=args.profile_name,
                 attempt=attempt,
+                cookies=cookies,
                 index=index,
                 total=len(attempts),
             )

@@ -317,6 +317,7 @@ def extract_field(driver, field: FieldConfig) -> Any:
 
 
 def crawl_page(driver, url: str, fields: list[FieldConfig], page_wait_seconds: float) -> dict[str, Any]:
+    crawl_started_at = time.perf_counter()
     driver.get(url)
     wait_for_page_ready(driver)
     if page_wait_seconds > 0:
@@ -342,6 +343,7 @@ def crawl_page(driver, url: str, fields: list[FieldConfig], page_wait_seconds: f
             else:
                 record["data"][field.name] = None
 
+    record["crawl_duration_seconds"] = round(time.perf_counter() - crawl_started_at, 3)
     return record
 
 
@@ -355,6 +357,7 @@ def write_output(output_file: str, payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    total_started_at = time.perf_counter()
     load_dotenv()
     args = parse_args()
     config_path = os.path.abspath(args.config)
@@ -377,14 +380,18 @@ def main() -> None:
 
     driver = None
     try:
+        login_started_at = time.perf_counter()
         driver, login_description = open_first_authenticated_driver(
             profile_path=profile_path,
             profile_name=settings["profile_name"],
             attempts=attempts,
             cookies=cookies,
         )
+        login_duration_seconds = round(time.perf_counter() - login_started_at, 3)
+        print(f"Login completed in {login_duration_seconds:.2f}s")
 
         results = []
+        crawl_started_at = time.perf_counter()
         for index, url in enumerate(pages, start=1):
             print(f"[{index}/{len(pages)}] Crawling {url}")
             results.append(
@@ -395,15 +402,22 @@ def main() -> None:
                     page_wait_seconds=settings["page_wait_seconds"],
                 )
             )
+        crawl_duration_seconds = round(time.perf_counter() - crawl_started_at, 3)
 
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "login_attempt": login_description,
             "page_count": len(results),
+            "timing": {
+                "login_duration_seconds": login_duration_seconds,
+                "crawl_duration_seconds": crawl_duration_seconds,
+                "total_duration_seconds": round(time.perf_counter() - total_started_at, 3),
+            },
             "results": results,
         }
         write_output(settings["output_file"], payload)
 
+        print(f"Crawled {len(results)} pages in {crawl_duration_seconds:.2f}s")
         print(f"Saved JSON output to: {settings['output_file']}")
     finally:
         if driver:
