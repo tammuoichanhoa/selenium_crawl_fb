@@ -1,0 +1,28 @@
+---------------------------------K-------------------------------------------------------------------------
+* Golang: Dùng để triển khai cơ chế bất đồng bộ để tối ưu thời gian xử lý
+* Tối ưu hóa cơ sở dữ liệu: Viết và tinh chỉnh các câu lệnh truy vấn cho MongoDB để đảm bảo hiệu suất cao.
+* Triển khai bộ nhớ đệm: Sử dụng Redis để tăng tốc độ truy xuất dữ liệu (đây là công nghệ được liệt kê trong dự án).
+* Lập trình các Microservices: Tập trung hoàn thiện các dịch vụ chuyên biệt cho xử lý các task yêu cầu, ghi log và báo cáo.
+* Tích hợp RabbitMQ: Thiết lập cơ chế trao đổi thông tin giữa các microservices thông qua RabbitMQ để hỗ trợ quá trình xử lý các task 
+yêu cầu một cách trơn tru
+
+Sau khi user import clone vào hệ thống (BE) và giao nhiệm vụ cho clone. Bên auto. Khi clone biết phải chạy auto cho token user thì bên auto sẽ check sống hay chết luôn và gửi api lên cho ô
+Sẽ khác nọ ban đầu cta họp. Vì api check live die rồi. Chỉ có cách duy nhất là đăng nhập trình duyệt check r gửi status sang thôi
+Ô import. Có các dạng sau nè. Đầy đủ nhất sẽ là Uid|pass|2fa|email|sđt|cookies. Ô tổ hợp các lựa chọn lại
+Uid|pass|2fa|cookies
+Uid|pass|cookies
+Uid|pass|2fa|email|sđt|cookies
+...
+
+
+
+
+---------------------------------------BA--------------------------------------------------------------------
+
+
+@Bảo Anh e nghiên cứu qua cho a nhá. Về phần auto. Ngôn ngữ code e lựa chọn code là gì đó. Nọ a quên k đề cập đến phần này. Cái này e chọn thoải mái nhé
+E nghiên cứu cho a trước selenium về đăng nhập theo dạng Cookies trước nhé. E dùng clone fb chính của e test cũng ksao đâu. 
+E để ý cho a là e nghiên cứu thêm profile folder nhé. Khi bật trình duyệt ảo lên và đăng nhập lần đầu tiên. Thư mục cache, user các thứ đó nó sẽ nằm trong folder đó. E tìm đúng folder đó vs địa chỉ đó. E lưu lại. 
+Lần 2 chạy lại thì e chỉ việc thêm 1 agrument đúng địa chỉ đó là khi mở fb. Nó sẽ tự load và k phải đăng nhập lại nữa. Cái này e cứ xem. Có gì k hiểu hỏi a nhé
+
+

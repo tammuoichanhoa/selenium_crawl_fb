@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  chrome:
+    image: selenium/standalone-chrome:latest
+    shm_size: 2gb
+    ports:
+      - "4444:4444"   # WebDriver endpoint
+      - "7900:7900"   # noVNC web UI (http://localhost:7900)
+    environment:
+      - SE_VNC_NO_PASSWORD=true          # disable VNC password prompt (default is "secret")
+      - SE_SCREEN_WIDTH=1366
+      - SE_SCREEN_HEIGHT=768
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_NODE_OVERRIDE_MAX_SESSIONS=true
+    volumes:
+      - ./chrome-profiles:/home/seluser/profiles       # parent dir for multiple Chrome profiles
+      - ./cookies.json:/home/seluser/cookies.json:ro   # optional: share your cookie file with the container
+    restart: unless-stopped
