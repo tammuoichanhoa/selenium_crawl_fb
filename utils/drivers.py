@@ -1,37 +1,81 @@
-import os
+from __future__ import annotations
+
+import shutil
 import subprocess
+import sys
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 from urllib.parse import urlparse
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from .cookies import parse_cookie_string
+from .waits import wait_for_page_ready, wait_for_seconds
 
-# Đảm bảo bạn đã có các hàm này trong file utils.py
-from utils import (
-    backup_profile_folder,
-    load_env_file,
-    parse_cookie_string,
-    select_working_proxy,
-)
+DEFAULT_CHROME_PATH_WIN = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+LINUX_CHROME_CANDIDATES = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+]
 
-# Đường dẫn mặc định tới file thực thi của Chrome trên Windows
-DEFAULT_CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+def _resolve_chrome_path(explicit_path: Optional[str] = None) -> str:
+    """Tìm đường dẫn Chrome phù hợp trên Windows/Linux."""
+    if explicit_path:
+        return explicit_path
+    print("Running on ", sys.platform.__str__())
+    if sys.platform.startswith("win"):
+        return DEFAULT_CHROME_PATH_WIN
+
+    if sys.platform.startswith("linux"):
+        for name in LINUX_CHROME_CANDIDATES:
+            found = shutil.which(name)
+            if found:
+                return found
+
+    raise FileNotFoundError(
+        "Không tìm thấy Chrome/Chromium. Hãy truyền chrome_binary_path "
+        "hoặc đặt CHROME_BINARY trong file .env."
+    )
+
 
 def _wait_for_port(port: int, timeout: int = 15) -> bool:
     """Hàm phụ trợ: Chờ cho đến khi port của Chrome được mở thành công."""
     import socket
+
     start_time = time.time()
     while time.time() - start_time < timeout:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            res = sock.connect_ex(('127.0.0.1', port))
+            res = sock.connect_ex(("127.0.0.1", port))
             if res == 0:
                 return True
         time.sleep(0.5)
     return False
+
+
+def _terminate_process(proc: subprocess.Popen, timeout: int = 5) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
+
+
+def terminate_chrome_process(driver: webdriver.Chrome, timeout: int = 5) -> None:
+    proc = getattr(driver, "_chrome_process", None)
+    if proc is None:
+        return
+    try:
+        _terminate_process(proc, timeout=timeout)
+    except Exception:
+        pass
+
 
 def create_local_driver(
     profile_path: str,
@@ -40,13 +84,13 @@ def create_local_driver(
     chrome_binary_path: Optional[str] = None,
     app_mode: bool = False,
     proxy: Optional[str] = None,
-    user_agent: Optional[str] = None
+    user_agent: Optional[str] = None,
 ) -> webdriver.Chrome:
     """Khởi tạo Chrome Driver bằng cách gọi process thật và attach Selenium qua cổng Debug."""
-    
-    actual_chrome_path = chrome_binary_path if chrome_binary_path else DEFAULT_CHROME_PATH
+
+    actual_chrome_path = _resolve_chrome_path(chrome_binary_path)
     options = Options()
-    
+
     # 1. Xây dựng lệnh CMD để mở Chrome với các tham số cần thiết
     cmd = [
         actual_chrome_path,
@@ -56,13 +100,13 @@ def create_local_driver(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-popup-blocking",
-        "--disable-infobars"
+        "--disable-infobars",
     ]
-    
+
     if headless:
         cmd.append("--headless=new")
         cmd.append("--disable-gpu")
-        
+
     if app_mode:
         cmd.append("--app=https://www.facebook.com")
         cmd.append("--force-device-scale-factor=0.75")
@@ -74,23 +118,38 @@ def create_local_driver(
         cmd.append(f"--user-agent={user_agent.strip()}")
 
     print(f"[DRIVER] Mở Chrome tại Port {port} | Proxy: {'Có' if proxy else 'Không'}")
-    
+
     # 2. Gọi process Chrome chạy độc lập
     try:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
         print(f"❌ Lỗi: Không tìm thấy file Chrome tại {actual_chrome_path}")
         raise
 
     # Đợi Chrome mở xong cổng debug
+    '''
+    @anhtb
+    Khi Selenium tự khởi tạo ChromeDriver, trình duyệt thường có nhiều dấu hiệu “automation”.
+    Attach qua debug port có thể ít bị phát hiện hơn trong một số trường hợp.
+    '''
     if not _wait_for_port(port):
-        raise Exception(f"Cổng {port} không mở được (Timeout). Trình duyệt có thể đã bị crash hoặc đang bị khóa bởi tiến trình khác.")
+        _terminate_process(proc)
+        raise Exception(
+            f"Cổng {port} không mở được (Timeout). "
+            "Trình duyệt có thể đã bị crash hoặc đang bị khóa bởi tiến trình khác."
+        )
 
     # 3. Kết nối Selenium vào trình duyệt đã mở
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
-    driver = webdriver.Chrome(options=options)
-    
+    try:
+        driver = webdriver.Chrome(options=options)
+    except Exception:
+        _terminate_process(proc)
+        raise
+    driver._chrome_process = proc
+
     return driver
+
 
 def login_facebook_with_cookies(driver: webdriver.Chrome, cookies_raw: str) -> bool:
     if not cookies_raw:
@@ -101,9 +160,7 @@ def login_facebook_with_cookies(driver: webdriver.Chrome, cookies_raw: str) -> b
         raise ValueError("Không thể parse được COOKIES. Hãy kiểm tra lại định dạng trong .env")
 
     driver.get("https://www.facebook.com/")
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
+    wait_for_page_ready(driver, 20)
 
     for cookie in cookies:
         payload = {
@@ -119,18 +176,18 @@ def login_facebook_with_cookies(driver: webdriver.Chrome, cookies_raw: str) -> b
 
     return verify_facebook_login_state(driver)
 
+
 def verify_facebook_login_state(driver: webdriver.Chrome) -> bool:
     driver.get("https://www.facebook.com/")
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
-    time.sleep(2)
+    wait_for_page_ready(driver, 20)
+    wait_for_seconds(driver, 2)
 
     current_url = driver.current_url.lower()
     page_source = driver.page_source.lower()
     login_form_present = 'name="email"' in page_source and 'name="pass"' in page_source
-    
+
     return ("login" not in current_url) and (not login_form_present)
+
 
 def get_facebook_login_debug_state(driver: webdriver.Chrome) -> str:
     current_url = driver.current_url
@@ -151,62 +208,42 @@ def get_facebook_login_debug_state(driver: webdriver.Chrome) -> str:
     hint_text = ",".join(hints) if hints else "unknown"
     return f"url={current_url} host={hostname} title={title!r} hints={hint_text}"
 
-def main() -> None:
-    env = load_env_file(".env")
-    cookies_raw = env.get("COOKIES", "")
-    user_agent = env.get("USER_AGENT", "")
-    login_method = env.get("LOGIN_METHOD", "cookies").strip().lower()
-    profile_dir = env.get("PROFILE_DIR", "").strip() or os.path.join(
-        os.getcwd(), "chrome_profile"
-    )
-    proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
-    proxy = select_working_proxy(env.get("PROXY"), proxies_file)
-    
-    # Tạo thư mục profile nếu chưa có
-    os.makedirs(profile_dir, exist_ok=True)
-    abs_profile_dir = os.path.abspath(profile_dir)
 
-    # Chọn một port để Debugger nối vào (bạn có thể đổi số này nếu bị trùng)
-    DEBUG_PORT = 9222
-
-    # Gọi hàm khởi tạo Driver mới
+def create_logged_in_driver(
+    login_method: str,
+    cookies_raw: str,
+    user_agent: str,
+    headless: bool,
+    profile_dir: str,
+    proxy: str | None,
+    chrome_binary: str | None,
+    debug_port: int,
+):
     driver = create_local_driver(
-        profile_path=abs_profile_dir,
-        port=DEBUG_PORT,
-        headless=False,
-        proxy=proxy or None,
-        user_agent=user_agent or None
+        profile_path=profile_dir,
+        port=debug_port,
+        headless=headless,
+        chrome_binary_path=chrome_binary,
+        proxy=proxy,
+        user_agent=user_agent,
     )
-    
+
     try:
         if login_method == "cookies":
             ok = login_facebook_with_cookies(driver, cookies_raw)
-            if ok:
-                print("Facebook login by cookies: SUCCESS")
-                try:
-                    archive_path = backup_profile_folder(abs_profile_dir)
-                    print(f"Profile folder saved to: {archive_path}")
-                except Exception as err:
-                    print(f"Failed to backup profile folder: {err}")
-            else:
-                print("Facebook login by cookies: FAILED")
-                print("Debug info:", get_facebook_login_debug_state(driver))
-                
         elif login_method == "profile":
             ok = verify_facebook_login_state(driver)
-            if ok:
-                print("Facebook login via profile folder: SUCCESS")
-            else:
-                print("Facebook login via profile folder: FAILED")
-                print("Debug info:", get_facebook_login_debug_state(driver))
         else:
-            raise ValueError(
-                "LOGIN_METHOD must be either 'cookies' or 'profile' (default 'cookies')."
+            raise ValueError("LOGIN_METHOD must be either 'cookies' or 'profile'.")
+
+        if not ok:
+            debug_state = get_facebook_login_debug_state(driver)
+            raise RuntimeError(
+                "Unable to verify Facebook login. "
+                f"Facebook redirected the session: {debug_state}"
             )
-
-        input("Nhấn Enter để đóng trình duyệt...")
-    finally:
+        return driver
+    except Exception:
         driver.quit()
-
-if __name__ == "__main__":
-    main()
+        terminate_chrome_process(driver)
+        raise

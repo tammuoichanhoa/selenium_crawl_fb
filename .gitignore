@@ -1,1 +1,53 @@
+# Env / secrets
 .env
+*.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+.tox/
+.nox/
+.pytype/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Selenium profiles / artifacts
+chrome_profile*/
+profiles/
+debug_artifacts/
+
+# Runtime outputs / sensitive
+crawl_results*.json
+cookies.txt
+
+
+docs/*

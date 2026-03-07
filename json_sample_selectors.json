@@ -1,0 +1,43 @@
+{
+  "site": "string",
+  "module": "string",
+  "page": "string",
+  "version": "string",
+  "updated_at": "YYYY-MM-DDTHH:mm:ssZ",
+  "updated_by": "string",
+  "environment": "prod|staging|dev",
+  "defaults": {
+    "wait": {
+      "state": "visible|clickable|presence",
+      "timeout_ms": 10000,
+      "poll_ms": 200
+    },
+    "iframe": null,
+    "shadow_root": null
+  },
+  "elements": {
+    "login.username": {
+      "primary": { "type": "css", "value": "#username" },
+      "fallbacks": [
+        { "type": "xpath", "value": "//input[@name='username']" },
+        { "type": "id", "value": "user" }
+      ],
+      "wait": { "state": "visible", "timeout_ms": 10000 },
+      "notes": "Ưu tiên data-testid nếu có"
+    },
+    "login.password": {
+      "primary": { "type": "css", "value": "#password" },
+      "fallbacks": [
+        { "type": "xpath", "value": "//input[@type='password']" }
+      ],
+      "wait": { "state": "visible", "timeout_ms": 10000 }
+    },
+    "login.submit": {
+      "primary": { "type": "css", "value": "button[type='submit']" },
+      "fallbacks": [
+        { "type": "xpath", "value": "//button[contains(.,'Đăng nhập')]" }
+      ],
+      "wait": { "state": "clickable", "timeout_ms": 10000 }
+    }
+  }
+}

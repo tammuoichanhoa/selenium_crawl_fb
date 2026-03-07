@@ -1,0 +1,66 @@
+{
+  "login": {
+    "method": "cookies",
+    "headless": false,
+    "profile_dir": "./chrome_profile"
+  },
+  "crawl": {
+    "pages_file": "pages.txt",
+    "max_workers": 3,
+    "login_stagger_seconds": 2,
+    "profile_dirs": [
+      "./chrome_profile_1",
+      "./chrome_profile_2",
+      "./chrome_profile_3"
+    ],
+    "wait_after_load": 3,
+    "wait_between_pages": 2,
+    "element_timeout": 15,
+    "output_file": "crawl_results.json"
+  },
+  "selectors": {
+    "site": "facebook",
+    "module": "profile",
+    "page": "about",
+    "environment": "prod",
+    "version": "1.0.0",
+    "updated_at": "2026-03-07T00:00:00Z",
+    "updated_by": "crawler-team",
+    "defaults": {
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 15000
+      }
+    },
+    "elements": {
+      "profile.page_title": {
+        "primary": { "type": "css", "value": "h1" },
+        "fallbacks": [
+          { "type": "xpath", "value": "//h1" }
+        ],
+        "wait": { "state": "visible", "timeout_ms": 15000 },
+        "attribute": "text",
+        "notes": "Ưu tiên h1, fallback xpath tổng quát"
+      },
+      "profile.followers": {
+        "primary": { "type": "xpath", "value": "//a[contains(@href,\"followers\")]" },
+        "fallbacks": [
+          { "type": "css", "value": "a[href*='followers']" }
+        ],
+        "wait": { "state": "visible", "timeout_ms": 15000 },
+        "attribute": "text"
+      },
+      "profile.recommendation_rating": {
+        "primary": {
+          "type": "xpath",
+          "value": "//span[contains(normalize-space(.),\"đề xuất\") and contains(normalize-space(.),\"lượt đánh giá\")]"
+        },
+        "fallbacks": [
+          { "type": "xpath", "value": "//span[contains(.,\"lượt đánh giá\")]" }
+        ],
+        "wait": { "state": "presence", "timeout_ms": 15000 },
+        "attribute": "text"
+      }
+    }
+  }
+}

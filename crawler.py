@@ -2,166 +2,34 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
 
-
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-
-from login import (
-    build_driver,
-    get_facebook_login_debug_state,
-    login_facebook_with_cookies,
-    verify_facebook_login_state,
+from utils import (
+    build_port_queue,
+    create_logged_in_driver,
+    extract_element,
+    guard_fragile_locators,
+    load_config,
+    load_env_file,
+    normalize_elements_config,
+    read_pages,
+    resolve_max_workers,
+    resolve_profile_dirs,
+    select_working_proxy,
+    split_pages_for_workers,
+    str_to_bool,
+    terminate_chrome_process,
+    validate_selector_payload,
+    wait_for_page_ready,
+    wait_for_seconds,
 )
-from utils import load_env_file, str_to_bool, load_config, select_working_proxy
 
 
-DEFAULT_CONFIG_PATH = "config.yml"
+DEFAULT_CONFIG_PATH = "config.json"
 DEFAULT_PAGES_FILE = "pages.txt"
-
-
-def parse_profile_dirs(raw_value: Any) -> List[str]:
-    if raw_value is None:
-        return []
-    if isinstance(raw_value, str):
-        parts = raw_value.replace("\n", ",").split(",")
-    elif isinstance(raw_value, list):
-        parts = raw_value
-    else:
-        return []
-
-    profile_dirs: List[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        candidate = str(part).strip()
-        if not candidate:
-            continue
-        normalized = os.path.abspath(os.path.expanduser(candidate))
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        profile_dirs.append(normalized)
-    return profile_dirs
-
-
-def resolve_profile_dirs(
-    env: Dict[str, str],
-    crawl_cfg: Dict[str, Any],
-    login_cfg: Dict[str, Any],
-) -> List[str]:
-    profile_dirs = parse_profile_dirs(env.get("PROFILE_DIRS"))
-    if profile_dirs:
-        return profile_dirs
-
-    profile_dirs = parse_profile_dirs(crawl_cfg.get("profile_dirs"))
-    if profile_dirs:
-        return profile_dirs
-
-    fallback_profile_dir = (
-        env.get("PROFILE_DIR")
-        or login_cfg.get("profile_dir")
-        or os.path.join(os.getcwd(), "chrome_profile")
-    )
-    return parse_profile_dirs([fallback_profile_dir])
-
-
-def read_pages(path: str) -> List[str]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Pages list not found: {path}")
-    with open(path, "r", encoding="utf-8") as file:
-        pages = [
-            line.strip()
-            for line in file
-            if line.strip() and not line.strip().startswith("#")
-        ]
-    if not pages:
-        raise ValueError("pages.txt is empty. Please add at least one URL.")
-    return pages
-
-
-def resolve_max_workers(
-    configured_value: Any,
-    total_pages: int,
-    login_method: str,
-    available_profiles: int,
-) -> int:
-    try:
-        max_workers = int(configured_value or 1)
-    except (TypeError, ValueError):
-        max_workers = 1
-
-    max_workers = max(1, min(max_workers, total_pages))
-
-    if login_method == "profile":
-        if available_profiles <= 1:
-            if max_workers > 1:
-                print(
-                    "[crawl] Only one profile is configured, "
-                    "so multi-threading is disabled."
-                )
-            return 1
-        return min(max_workers, available_profiles)
-
-    if login_method == "cookies" and max_workers > 1:
-        print(
-            "[crawl] LOGIN_METHOD=cookies now runs with one worker by default. "
-            "Use multiple Facebook profiles for safe parallel crawling."
-        )
-        return 1
-    return max_workers
-
-
-def resolve_by(by_value: str) -> str:
-    mapping = {
-        "css": By.CSS_SELECTOR,
-        "xpath": By.XPATH,
-        "id": By.ID,
-        "name": By.NAME,
-        "tag": By.TAG_NAME,
-        "class": By.CLASS_NAME,
-        "link_text": By.LINK_TEXT,
-        "partial_link_text": By.PARTIAL_LINK_TEXT,
-    }
-    key = by_value.strip().lower()
-    if key not in mapping:
-        supported = ", ".join(mapping.keys())
-        raise ValueError(f"Unsupported locator strategy '{by_value}'. Use: {supported}")
-    return mapping[key]
-
-
-def extract_element(
-    driver,
-    element_cfg: Dict[str, Any],
-    timeout: int,
-) -> str | None:
-    by_value = element_cfg.get("by", "css")
-    selector = element_cfg.get("selector")
-    attr = element_cfg.get("attribute", "text")
-    required = element_cfg.get("required", False)
-
-    if not selector:
-        raise ValueError("Each element definition must include a 'selector'.")
-
-    by = resolve_by(by_value)
-    try:
-        element = WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((by, selector))
-        )
-    except TimeoutException:
-        if required:
-            raise TimeoutException(
-                f"Timed out waiting for element '{element_cfg.get('name', selector)}'"
-            )
-        return None
-
-    if attr == "text":
-        return element.text.strip()
-    return element.get_attribute(attr)
 
 
 def crawl_page(
@@ -170,70 +38,30 @@ def crawl_page(
     elements_cfg: List[Dict[str, Any]],
     wait_after_load: int,
     element_timeout: int,
+    default_wait_cfg: Dict[str, Any] | None,
+    selector_debug_cfg: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     print(f"[crawl] Visiting {url}")
     driver.get(url)
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
-    time.sleep(max(wait_after_load, 0))
+    wait_for_page_ready(driver, 20)
+    wait_for_seconds(driver, wait_after_load)
 
     data: Dict[str, Any] = {"url": url}
     for element_cfg in elements_cfg:
         name = element_cfg.get("name") or element_cfg.get("selector")
         try:
-            value = extract_element(driver, element_cfg, element_timeout)
+            value = extract_element(
+                driver,
+                element_cfg,
+                element_timeout,
+                default_wait_cfg,
+                selector_debug_cfg,
+            )
         except Exception as exc:
             print(f"[crawl] Failed to capture '{name}' on {url}: {exc}")
             value = None
         data[name] = value
     return data
-
-
-def split_pages_for_workers(
-    pages: List[str],
-    max_workers: int,
-) -> List[List[Tuple[int, str]]]:
-    batches: List[List[Tuple[int, str]]] = [[] for _ in range(max_workers)]
-    for index, url in enumerate(pages):
-        batches[index % max_workers].append((index, url))
-    return [batch for batch in batches if batch]
-
-
-def create_logged_in_driver(
-    login_method: str,
-    cookies_raw: str,
-    user_agent: str,
-    headless: bool,
-    profile_dir: str | None,
-    proxy: str | None,
-):
-    driver_profile_dir = profile_dir if login_method == "profile" else None
-    driver = build_driver(
-        user_agent=user_agent,
-        headless=headless,
-        profile_dir=driver_profile_dir,
-        proxy=proxy,
-    )
-
-    try:
-        if login_method == "cookies":
-            ok = login_facebook_with_cookies(driver, cookies_raw)
-        elif login_method == "profile":
-            ok = verify_facebook_login_state(driver)
-        else:
-            raise ValueError("LOGIN_METHOD must be either 'cookies' or 'profile'.")
-
-        if not ok:
-            debug_state = get_facebook_login_debug_state(driver)
-            raise RuntimeError(
-                "Unable to verify Facebook login. "
-                f"Facebook redirected the session: {debug_state}"
-            )
-        return driver
-    except Exception:
-        driver.quit()
-        raise
 
 
 def crawl_pages_batch(
@@ -244,13 +72,17 @@ def crawl_pages_batch(
     cookies_raw: str,
     user_agent: str,
     headless: bool,
-    profile_dir: str | None,
+    profile_dir: str,
     proxy: str | None,
+    chrome_binary: str | None,
+    port_queue: queue.Queue[int],
     elements_cfg: List[Dict[str, Any]],
     wait_after_load: int,
     wait_between_pages: int,
     element_timeout: int,
     login_stagger_seconds: int,
+    default_wait_cfg: Dict[str, Any] | None,
+    selector_debug_cfg: Dict[str, Any] | None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
     print(
@@ -262,24 +94,28 @@ def crawl_pages_batch(
         print(f"[worker {worker_id}] Waiting {delay}s before login")
         time.sleep(delay)
 
+    debug_port = port_queue.get()
+    driver = None
     try:
-        driver = create_logged_in_driver(
-            login_method=login_method,
-            cookies_raw=cookies_raw,
-            user_agent=user_agent,
-            headless=headless,
-            profile_dir=profile_dir,
-            proxy=proxy,
-        )
-    except Exception as exc:
-        print(f"[worker {worker_id}] Login failed: {exc}")
-        return [
-            (index, {"url": url, "error": f"login_failed: {exc}"})
-            for index, url in indexed_pages
-        ]
+        try:
+            driver = create_logged_in_driver(
+                login_method=login_method,
+                cookies_raw=cookies_raw,
+                user_agent=user_agent,
+                headless=headless,
+                profile_dir=profile_dir,
+                proxy=proxy,
+                chrome_binary=chrome_binary,
+                debug_port=debug_port,
+            )
+        except Exception as exc:
+            print(f"[worker {worker_id}] Login failed: {exc}")
+            return [
+                (index, {"url": url, "error": f"login_failed: {exc}"})
+                for index, url in indexed_pages
+            ]
 
-    results: List[Tuple[int, Dict[str, Any]]] = []
-    try:
+        results: List[Tuple[int, Dict[str, Any]]] = []
         for position, (index, url) in enumerate(indexed_pages):
             try:
                 page_data = crawl_page(
@@ -288,6 +124,8 @@ def crawl_pages_batch(
                     elements_cfg,
                     wait_after_load,
                     element_timeout,
+                    default_wait_cfg,
+                    selector_debug_cfg,
                 )
             except Exception as exc:
                 print(f"[worker {worker_id}] Failed on {url}: {exc}")
@@ -297,11 +135,14 @@ def crawl_pages_batch(
 
             is_last_page = position == len(indexed_pages) - 1
             if not is_last_page:
-                time.sleep(max(wait_between_pages, 0))
+                wait_for_seconds(driver, wait_between_pages)
         return results
     finally:
-        driver.quit()
-        print(f"[worker {worker_id}] Finished")
+        if driver is not None:
+            driver.quit()
+            terminate_chrome_process(driver)
+        port_queue.put(debug_port)
+        print(f"[worker {worker_id}] Finished (port {debug_port})")
 
 
 def main() -> None:
@@ -312,6 +153,7 @@ def main() -> None:
     env = load_env_file(".env")
     cookies_raw = env.get("COOKIES", "")
     user_agent = env.get("USER_AGENT", "")
+    chrome_binary = env.get("CHROME_BINARY", "").strip() or None
     proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
     proxy = select_working_proxy(env.get("PROXY"), proxies_file)
 
@@ -332,11 +174,96 @@ def main() -> None:
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
     output_file = crawl_cfg.get("output_file", "crawl_results.json")
-    elements_cfg = crawl_cfg.get("elements", [])
+    default_wait_cfg: Dict[str, Any] | None = None
+    selector_payload = None
+    selector_debug_cfg: Dict[str, Any] | None = None
+    
+    if isinstance(config.get("selectors"), dict):
+        selector_payload = validate_selector_payload(config["selectors"])
+    elif isinstance(crawl_cfg.get("selectors"), dict):
+        selector_payload = validate_selector_payload(crawl_cfg["selectors"])
 
+    if selector_payload is not None:
+        selector_debug_cfg = {}
+        if isinstance(selector_payload.get("debug"), dict):
+            selector_debug_cfg.update(selector_payload["debug"])
+        if isinstance(selector_payload.get("defaults"), dict):
+            defaults_debug = selector_payload["defaults"].get("debug")
+            if isinstance(defaults_debug, dict):
+                selector_debug_cfg.update(defaults_debug)
+        if "SELECTOR_DEBUG" in env:
+            selector_debug_cfg["enabled"] = str_to_bool(env.get("SELECTOR_DEBUG"))
+        if "SELECTOR_LOG_CONFIG" in env:
+            selector_debug_cfg["log_config"] = str_to_bool(env.get("SELECTOR_LOG_CONFIG"))
+        if "SELECTOR_CAPTURE" in env:
+            selector_debug_cfg["capture_on_fail"] = str_to_bool(env.get("SELECTOR_CAPTURE"))
+        if "SELECTOR_CAPTURE_DIR" in env:
+            selector_debug_cfg["capture_dir"] = env.get("SELECTOR_CAPTURE_DIR")
+
+        if not selector_debug_cfg:
+            selector_debug_cfg = None
+
+        default_wait_cfg = (
+            selector_payload.get("defaults", {}).get("wait")
+            if isinstance(selector_payload.get("defaults"), dict)
+            else None
+        )
+        raw_elements_cfg = selector_payload.get("elements", selector_payload)
+    else:
+        raw_elements_cfg = crawl_cfg.get("elements", [])
+
+    elements_cfg = normalize_elements_config(raw_elements_cfg)
+    locator_guard_cfg = None
+    if selector_payload and isinstance(selector_payload.get("defaults"), dict):
+        locator_guard_cfg = selector_payload["defaults"].get("locator_guard")
+
+    if selector_payload and selector_debug_cfg:
+        debug_enabled = selector_debug_cfg.get("enabled")
+        if debug_enabled is None:
+            debug_enabled = bool(
+                selector_debug_cfg.get("log_config")
+                or selector_debug_cfg.get("capture_on_fail")
+            )
+        if debug_enabled:
+            version = selector_payload.get("version") or "unknown"
+            site = selector_payload.get("site") or "unknown"
+            module = selector_payload.get("module") or "unknown"
+            page = selector_payload.get("page") or "unknown"
+            env_name = selector_payload.get("environment") or "unknown"
+            print(
+                "[selectors] Using selector config "
+                f"site={site} module={module} page={page} env={env_name} "
+                f"version={version}"
+            )
+            if selector_debug_cfg.get("log_config", True):
+                print(
+                    "[selectors] Config:\n"
+                    + json.dumps(selector_payload, ensure_ascii=False, indent=2)
+                )
+
+    locator_guard_mode = None
+    if isinstance(locator_guard_cfg, dict):
+        locator_guard_mode = (
+            locator_guard_cfg.get("mode")
+            or locator_guard_cfg.get("level")
+            or locator_guard_cfg.get("severity")
+        )
+    elif isinstance(locator_guard_cfg, str):
+        locator_guard_mode = locator_guard_cfg
+
+    locator_guard_mode = (
+        env.get("LOCATOR_GUARD")
+        or locator_guard_mode
+        or "warn"
+    )
+    guard_fragile_locators(elements_cfg, locator_guard_mode)
+    port_min = int(env.get("PORT_RANGE_MIN") or login_cfg.get("port_min") or 8000)
+    port_max = int(env.get("PORT_RANGE_MAX") or login_cfg.get("port_max") or 9999)
+    
     if not elements_cfg:
         raise ValueError(
-            "No elements configured. Please add entries under crawl.elements in config.yml"
+            "No elements configured. Please add elements under selectors.elements "
+            "in config.json or under crawl.elements (legacy)."
         )
 
     pages = read_pages(pages_file)
@@ -348,6 +275,14 @@ def main() -> None:
     )
     indexed_results: Dict[int, Dict[str, Any]] = {}
     page_batches = split_pages_for_workers(pages, max_workers)
+    port_pool_size = int(
+        env.get("PORT_POOL_SIZE")
+        or login_cfg.get("port_pool_size")
+        or max_workers
+    )
+    print("port_pool_size: ", port_pool_size)
+    port_pool_size = max(port_pool_size, max_workers)
+    port_queue = build_port_queue(port_min, port_max, port_pool_size)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
@@ -361,11 +296,15 @@ def main() -> None:
                 headless=headless,
                 profile_dir=profile_dirs[(worker_id - 1) % len(profile_dirs)],
                 proxy=proxy or None,
+                chrome_binary=chrome_binary,
+                port_queue=port_queue,
                 elements_cfg=elements_cfg,
                 wait_after_load=wait_after_load,
                 wait_between_pages=wait_between_pages,
                 element_timeout=element_timeout,
                 login_stagger_seconds=login_stagger_seconds,
+                default_wait_cfg=default_wait_cfg,
+                selector_debug_cfg=selector_debug_cfg,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]
