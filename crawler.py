@@ -18,6 +18,7 @@ from utils import (
     read_pages,
     resolve_max_workers,
     resolve_profile_dirs,
+    resolve_selector_payload,
     select_working_proxy,
     split_pages_for_workers,
     str_to_bool,
@@ -176,12 +177,28 @@ def main() -> None:
     output_file = crawl_cfg.get("output_file", "crawl_results.json")
     default_wait_cfg: Dict[str, Any] | None = None
     selector_payload = None
+    selector_source = "none"
     selector_debug_cfg: Dict[str, Any] | None = None
-    
+
+    # Resolve selector payload with remote download + cache fallback.
+    local_selector = None
     if isinstance(config.get("selectors"), dict):
-        selector_payload = validate_selector_payload(config["selectors"])
+        local_selector = config["selectors"]
     elif isinstance(crawl_cfg.get("selectors"), dict):
-        selector_payload = validate_selector_payload(crawl_cfg["selectors"])
+        local_selector = crawl_cfg["selectors"]
+
+    resolved_payload, selector_source = resolve_selector_payload(local_selector, env)
+    if resolved_payload is not None:
+        try:
+            selector_payload = validate_selector_payload(resolved_payload)
+        except ValueError as exc:
+            # If remote/cache payload is invalid, fall back to local config if possible.
+            print(f"[selectors] WARN: invalid selector payload from {selector_source}: {exc}")
+            if local_selector and local_selector is not resolved_payload:
+                selector_payload = validate_selector_payload(local_selector)
+                selector_source = "local"
+            else:
+                raise
 
     if selector_payload is not None:
         selector_debug_cfg = {}
@@ -233,7 +250,7 @@ def main() -> None:
             print(
                 "[selectors] Using selector config "
                 f"site={site} module={module} page={page} env={env_name} "
-                f"version={version}"
+                f"version={version} source={selector_source}"
             )
             if selector_debug_cfg.get("log_config", True):
                 print(

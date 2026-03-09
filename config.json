@@ -11,7 +11,7 @@
     "profile_dirs": [
       "./chrome_profile_1",
       "./chrome_profile_2",
-      "./chrome_profile_3"
+      "./chrome_profile_33"
     ],
     "wait_after_load": 3,
     "wait_between_pages": 2,

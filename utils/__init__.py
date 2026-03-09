@@ -27,6 +27,7 @@ from .selectors import (
     resolve_wait_timeout_seconds,
     validate_selector_payload,
 )
+from .selector_remote import resolve_selector_payload
 from .waits import (
     wait_for_body,
     wait_for_document_ready,
@@ -53,6 +54,7 @@ __all__ = [
     "parse_cookie_string",
     "parse_profile_dirs",
     "read_pages",
+    "resolve_selector_payload",
     "resolve_by",
     "resolve_locator",
     "resolve_max_workers",
