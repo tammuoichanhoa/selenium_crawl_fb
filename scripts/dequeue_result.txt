@@ -1,0 +1,6 @@
+timestamp_utc=2026-03-17T13:29:01.303180Z
+exit_code=0
+stderr=
+command=curl -X POST <url> -H 'accept: application/json' -H 'Authorization: Bearer ***'
+
+{"items":[{"task_id":"69a6e5fb77f5503fb86e0d66","social_type":"facebook","uid":"https://facebook.com/100006001007821","crawl_types":["profile_info","page_info"],"account":{"uid":"44444","pass":"555"}}],"config":null,"config_sha256":""}

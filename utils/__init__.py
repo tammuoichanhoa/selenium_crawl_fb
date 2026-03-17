@@ -1,3 +1,5 @@
+"""Public utility exports for the crawler package."""
+
 from __future__ import annotations
 
 from .config import DEFAULT_CONFIG_PATH, load_config
@@ -11,6 +13,7 @@ from .drivers import (
     verify_facebook_login_state,
 )
 from .env import load_env_file, str_to_bool
+from .logging_setup import setup_logging
 from .pages import read_pages, resolve_max_workers, split_pages_for_workers
 from .ports import build_port_queue, is_port_free
 from .profile_backup import backup_profile_folder
@@ -64,6 +67,7 @@ __all__ = [
     "select_working_proxy",
     "split_pages_for_workers",
     "str_to_bool",
+    "setup_logging",
     "terminate_chrome_process",
     "validate_selector_payload",
     "verify_facebook_login_state",

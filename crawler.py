@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 import os
 import queue
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
@@ -20,6 +23,7 @@ from utils import (
     resolve_profile_dirs,
     resolve_selector_payload,
     select_working_proxy,
+    setup_logging,
     split_pages_for_workers,
     str_to_bool,
     terminate_chrome_process,
@@ -31,8 +35,20 @@ from utils import (
 
 DEFAULT_CONFIG_PATH = "config.json"
 DEFAULT_PAGES_FILE = "pages.txt"
+logger = logging.getLogger(__name__)
 
+'''
+    Nhiệm vụ: vào 1 URL và trích dữ liệu.
 
+    Luồng đơn giản:
+
+    driver.get(url) mở trang.
+    wait_for_page_ready và wait_for_seconds để trang ổn định.
+    Duyệt từng cấu hình selector trong elements_cfg.
+    Gọi extract_element(...) để lấy dữ liệu.
+    Lỗi thì ghi None và log lỗi.
+    Trả về dict dữ liệu, có key "url".
+    '''
 def crawl_page(
     driver,
     url: str,
@@ -42,11 +58,12 @@ def crawl_page(
     default_wait_cfg: Dict[str, Any] | None,
     selector_debug_cfg: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
-    print(f"[crawl] Visiting {url}")
+    logger.info("[crawl] Visiting %s", url)
     driver.get(url)
     wait_for_page_ready(driver, 20)
     wait_for_seconds(driver, wait_after_load)
 
+    
     data: Dict[str, Any] = {"url": url}
     for element_cfg in elements_cfg:
         name = element_cfg.get("name") or element_cfg.get("selector")
@@ -59,23 +76,70 @@ def crawl_page(
                 selector_debug_cfg,
             )
         except Exception as exc:
-            print(f"[crawl] Failed to capture '{name}' on {url}: {exc}")
+            logger.warning(
+                "[crawl] Failed to capture '%s' on %s: %s",
+                name,
+                url,
+                exc,
+            )
             value = None
         data[name] = value
     return data
 
 
+def _normalize_selector_modules(root: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(root, dict):
+        return {}
+
+    if isinstance(root.get("modules"), dict):
+        modules = root["modules"]
+        return {
+            str(name): validate_selector_payload(payload)
+            for name, payload in modules.items()
+            if isinstance(payload, dict)
+        }
+
+    if "elements" in root:
+        return {"default": validate_selector_payload(root)}
+
+    if root and all(isinstance(value, dict) for value in root.values()):
+        return {
+            str(name): validate_selector_payload(payload)
+            for name, payload in root.items()
+        }
+
+    return {}
+
+'''
+Nhiệm vụ: một worker xử lý một nhóm URL.
+
+Luồng dễ hiểu:
+
+In log worker, nếu có “giãn đăng nhập” (login_stagger_seconds) thì đợi.
+Lấy debug_port từ port_queue.
+Tạo trình duyệt + đăng nhập bằng create_logged_in_driver(...).
+Duyệt từng URL trong batch:
+Gọi crawl_page(...) để lấy dữ liệu.
+Nếu lỗi thì ghi error.
+Giữa các trang, đợi wait_between_pages.
+Đóng driver, trả lại port về queue.
+'''
 def crawl_pages_batch(
     worker_id: int,
     indexed_pages: List[Tuple[int, str]],
     *,
     login_method: str,
     cookies_raw: str,
-    user_agent: str,
+    user_agents: List[str],
+    user_agent_fallback: str,
     headless: bool,
     profile_dir: str,
     proxy: str | None,
     chrome_binary: str | None,
+    chrome_binary_win_path: str | None,
+    chrome_binary_candidates: List[str] | None,
+    fb_home_url: str | None,
+    fb_locale_url: str | None,
     port_queue: queue.Queue[int],
     elements_cfg: List[Dict[str, Any]],
     wait_after_load: int,
@@ -86,16 +150,28 @@ def crawl_pages_batch(
     selector_debug_cfg: Dict[str, Any] | None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
-    print(
+    logger.info(
         f"[worker {worker_id}] Starting with {len(indexed_pages)} page(s) "
         f"using {profile_label}"
     )
     if login_stagger_seconds > 0 and worker_id > 1:
         delay = login_stagger_seconds * (worker_id - 1)
-        print(f"[worker {worker_id}] Waiting {delay}s before login")
+        logger.info("[worker %s] Waiting %ss before login", worker_id, delay)
         time.sleep(delay)
 
     debug_port = port_queue.get()
+    user_agent = (
+        random.choice(user_agents)
+        if user_agents
+        else user_agent_fallback
+    )
+    if user_agent:
+        logger.info(
+            "[worker %s] Using user-agent (port %s): %s",
+            worker_id,
+            debug_port,
+            user_agent,
+        )
     driver = None
     try:
         try:
@@ -108,9 +184,13 @@ def crawl_pages_batch(
                 proxy=proxy,
                 chrome_binary=chrome_binary,
                 debug_port=debug_port,
+                home_url=fb_home_url or "https://www.facebook.com/",
+                locale_url=fb_locale_url or "https://www.facebook.com/?locale=vi_VN",
+                chrome_binary_win_path=chrome_binary_win_path,
+                chrome_binary_candidates=chrome_binary_candidates,
             )
         except Exception as exc:
-            print(f"[worker {worker_id}] Login failed: {exc}")
+            logger.error("[worker %s] Login failed: %s", worker_id, exc)
             return [
                 (index, {"url": url, "error": f"login_failed: {exc}"})
                 for index, url in indexed_pages
@@ -129,7 +209,7 @@ def crawl_pages_batch(
                     selector_debug_cfg,
                 )
             except Exception as exc:
-                print(f"[worker {worker_id}] Failed on {url}: {exc}")
+                logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
                 page_data = {"url": url, "error": str(exc)}
 
             results.append((index, page_data))
@@ -143,10 +223,27 @@ def crawl_pages_batch(
             driver.quit()
             terminate_chrome_process(driver)
         port_queue.put(debug_port)
-        print(f"[worker {worker_id}] Finished (port {debug_port})")
+        logger.info("[worker %s] Finished (port %s)", worker_id, debug_port)
 
 
 def main() -> None:
+    setup_logging()
+    parser = argparse.ArgumentParser(description="Facebook crawler")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        dest="max_workers",
+        help="Override max worker threads (takes precedence over .env/config).",
+    )
+    parser.add_argument(
+        "--selector-module",
+        dest="selector_module",
+        help="Selector module to use (overrides env/config).",
+    )
+    args = parser.parse_args()
+    '''
+    Load cấu hình crawler
+    '''
     config = load_config(DEFAULT_CONFIG_PATH)
     crawl_cfg = config["crawl"]
     login_cfg = config["login"]
@@ -154,7 +251,29 @@ def main() -> None:
     env = load_env_file(".env")
     cookies_raw = env.get("COOKIES", "")
     user_agent = env.get("USER_AGENT", "")
+    user_agents_file = env.get("USER_AGENTS_FILE", "user_agents.txt").strip() or "user_agents.txt"
+    user_agents: List[str] = []
+    if os.path.exists(user_agents_file):
+        with open(user_agents_file, "r", encoding="utf-8") as file:
+            user_agents = [
+                line.strip()
+                for line in file
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        if not user_agents:
+            logger.warning("[user-agent] %s is empty; using USER_AGENT from .env", user_agents_file)
+    else:
+        logger.warning("[user-agent] %s not found; using USER_AGENT from .env", user_agents_file)
     chrome_binary = env.get("CHROME_BINARY", "").strip() or None
+    chrome_binary_win_path = env.get("CHROME_BINARY_WIN_PATH", "").strip() or None
+    chrome_binary_candidates_raw = env.get("CHROME_BINARY_CANDIDATES", "").strip()
+    chrome_binary_candidates = (
+        [item.strip() for item in chrome_binary_candidates_raw.split(",") if item.strip()]
+        if chrome_binary_candidates_raw
+        else None
+    )
+    fb_home_url = env.get("FB_HOME_URL", "").strip() or None
+    fb_locale_url = env.get("FB_LOCALE_URL", "").strip() or None
     proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
     proxy = select_working_proxy(env.get("PROXY"), proxies_file)
 
@@ -167,7 +286,9 @@ def main() -> None:
     for profile_dir in profile_dirs:
         os.makedirs(profile_dir, exist_ok=True)
 
-    # arguments to build driver in Selenium
+    '''
+    Arguments to build driver in Selenium -> Đưa ra thành 1 hàm load config
+    '''
     headless = str_to_bool(env.get("HEADLESS"), login_cfg.get("headless", False))
     pages_file = crawl_cfg.get("pages_file") or DEFAULT_PAGES_FILE
     wait_after_load = int(crawl_cfg.get("wait_after_load", 3))
@@ -181,11 +302,38 @@ def main() -> None:
     selector_debug_cfg: Dict[str, Any] | None = None
 
     # Resolve selector payload with remote download + cache fallback.
-    local_selector = None
+    selector_root = None
     if isinstance(config.get("selectors"), dict):
-        local_selector = config["selectors"]
+        selector_root = config["selectors"]
     elif isinstance(crawl_cfg.get("selectors"), dict):
-        local_selector = crawl_cfg["selectors"]
+        selector_root = crawl_cfg["selectors"]
+
+    selector_modules = _normalize_selector_modules(selector_root)
+    selector_module = (
+        args.selector_module
+        or env.get("SELECTOR_MODULE")
+        or crawl_cfg.get("selector_module")
+        or crawl_cfg.get("module")
+    )
+    if selector_module and selector_module not in selector_modules:
+        logger.warning(
+            "[selectors] module '%s' not found in config; using fallback.",
+            selector_module,
+        )
+        selector_module = None
+    if selector_module is None:
+        if len(selector_modules) == 1:
+            selector_module = next(iter(selector_modules.keys()))
+        elif "page" in selector_modules:
+            selector_module = "page"
+        elif selector_modules:
+            selector_module = next(iter(selector_modules.keys()))
+
+    local_selector = (
+        selector_modules.get(selector_module)
+        if selector_modules
+        else selector_root
+    )
 
     resolved_payload, selector_source = resolve_selector_payload(local_selector, env)
     if resolved_payload is not None:
@@ -193,7 +341,11 @@ def main() -> None:
             selector_payload = validate_selector_payload(resolved_payload)
         except ValueError as exc:
             # If remote/cache payload is invalid, fall back to local config if possible.
-            print(f"[selectors] WARN: invalid selector payload from {selector_source}: {exc}")
+            logger.warning(
+                "[selectors] invalid selector payload from %s: %s",
+                selector_source,
+                exc,
+            )
             if local_selector and local_selector is not resolved_payload:
                 selector_payload = validate_selector_payload(local_selector)
                 selector_source = "local"
@@ -247,13 +399,13 @@ def main() -> None:
             module = selector_payload.get("module") or "unknown"
             page = selector_payload.get("page") or "unknown"
             env_name = selector_payload.get("environment") or "unknown"
-            print(
+            logger.info(
                 "[selectors] Using selector config "
                 f"site={site} module={module} page={page} env={env_name} "
                 f"version={version} source={selector_source}"
             )
             if selector_debug_cfg.get("log_config", True):
-                print(
+                logger.info(
                     "[selectors] Config:\n"
                     + json.dumps(selector_payload, ensure_ascii=False, indent=2)
                 )
@@ -284,8 +436,13 @@ def main() -> None:
         )
 
     pages = read_pages(pages_file)
+    configured_max_workers = (
+        args.max_workers
+        if args.max_workers is not None
+        else env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(pages))
+    )
     max_workers = resolve_max_workers(
-        env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(pages)),
+        configured_max_workers,
         len(pages),
         login_method,
         len(profile_dirs),
@@ -297,7 +454,7 @@ def main() -> None:
         or login_cfg.get("port_pool_size")
         or max_workers
     )
-    print("port_pool_size: ", port_pool_size)
+    logger.info("port_pool_size: %s", port_pool_size)
     port_pool_size = max(port_pool_size, max_workers)
     port_queue = build_port_queue(port_min, port_max, port_pool_size)
 
@@ -309,11 +466,16 @@ def main() -> None:
                 batch,
                 login_method=login_method,
                 cookies_raw=cookies_raw,
-                user_agent=user_agent,
+                user_agents=user_agents,
+                user_agent_fallback=user_agent,
                 headless=headless,
                 profile_dir=profile_dirs[(worker_id - 1) % len(profile_dirs)],
                 proxy=proxy or None,
                 chrome_binary=chrome_binary,
+                chrome_binary_win_path=chrome_binary_win_path,
+                chrome_binary_candidates=chrome_binary_candidates,
+                fb_home_url=fb_home_url,
+                fb_locale_url=fb_locale_url,
                 port_queue=port_queue,
                 elements_cfg=elements_cfg,
                 wait_after_load=wait_after_load,
@@ -334,9 +496,11 @@ def main() -> None:
 
     with open(output_file, "w", encoding="utf-8") as file:
         json.dump(results, file, ensure_ascii=False, indent=2)
-    print(
-        f"[crawl] Saved {len(results)} records to {output_file} "
-        f"using {max_workers} worker(s)"
+    logger.info(
+        "[crawl] Saved %s records to %s using %s worker(s)",
+        len(results),
+        output_file,
+        max_workers,
     )
 
 

@@ -1,14 +1,19 @@
+"""Remote selector config download, caching, and lookup helpers."""
+
 from __future__ import annotations
 
-import json
-import os
-import re
-from datetime import datetime
-from typing import Any, Dict, Iterable, Tuple
+import json  # parse selector payloads and metadata
+import os  # file paths for cache
+import re  # sanitize cache keys
+import logging
+from datetime import datetime  # timestamps for cache metadata
+from typing import Any, Dict, Iterable, Tuple  # type hints
 
-import requests
+import requests  # HTTP requests to selector service
 
-from .env import str_to_bool
+from .env import str_to_bool  # env flag parsing
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SELECTOR_ENDPOINT = (
     "https://gasoline-asn-protecting-pictures.trycloudflare.com/configs/auto-node"
@@ -120,7 +125,10 @@ def download_selector_with_cache(
         )
     except Exception as exc:  # network/timeouts/etc.
         # Clear warning when we cannot download; fallback to cache if possible.
-        print(f"[selectors] WARN: download failed ({exc}). Using cached config if available.")
+        logger.warning(
+            "[selectors] download failed (%s). Using cached config if available.",
+            exc,
+        )
         return cached_payload, "cache" if cached_payload else "none"
 
     if response.status_code == 304:
@@ -128,7 +136,7 @@ def download_selector_with_cache(
         return cached_payload, "cache" if cached_payload else "none"
 
     if response.status_code != 200:
-        print(
+        logger.warning(
             "[selectors] WARN: download failed with "
             f"status={response.status_code}. Using cached config if available."
         )
@@ -137,12 +145,14 @@ def download_selector_with_cache(
     try:
         data = response.json()
     except ValueError:
-        print("[selectors] WARN: download returned invalid JSON. Using cached config if available.")
+        logger.warning(
+            "[selectors] download returned invalid JSON. Using cached config if available."
+        )
         return cached_payload, "cache" if cached_payload else "none"
 
     payload = pick_selector_payload(data, site, environment, module, page)
     if payload is None:
-        print(
+        logger.warning(
             "[selectors] WARN: download JSON did not contain matching selector config. "
             "Using cached config if available."
         )
@@ -167,7 +177,7 @@ def login_before_download(env: Dict[str, str], timeout: int) -> Dict[str, str] |
     password = env.get("SELECTOR_PASSWORD", DEFAULT_SELECTOR_PASSWORD)
 
     if not login_url:
-        print("[selectors] WARN: login URL is empty; cannot authenticate.")
+        logger.warning("[selectors] login URL is empty; cannot authenticate.")
         return None
 
     payload = {"username": username, "password": password}
@@ -179,11 +189,14 @@ def login_before_download(env: Dict[str, str], timeout: int) -> Dict[str, str] |
             timeout=timeout,
         )
     except Exception as exc:
-        print(f"[selectors] WARN: login failed ({exc}). Using cached config if available.")
+        logger.warning(
+            "[selectors] login failed (%s). Using cached config if available.",
+            exc,
+        )
         return None
 
     if response.status_code != 200:
-        print(
+        logger.warning(
             "[selectors] WARN: login failed with "
             f"status={response.status_code}. Using cached config if available."
         )
@@ -192,14 +205,18 @@ def login_before_download(env: Dict[str, str], timeout: int) -> Dict[str, str] |
     try:
         data = response.json() or {}
     except ValueError:
-        print("[selectors] WARN: login returned invalid JSON. Using cached config if available.")
+        logger.warning(
+            "[selectors] login returned invalid JSON. Using cached config if available."
+        )
         return None
 
     token = extract_token(data)
     if not token:
-        print("[selectors] WARN: login response missing token. Using cached config if available.")
+        logger.warning(
+            "[selectors] login response missing token. Using cached config if available."
+        )
         return None
-    print({"Authorization": f"Bearer {token}"})
+    logger.debug("[selectors] received auth token for selector download.")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -230,6 +247,7 @@ def build_cache_paths(
     module: str | None,
     page: str | None,
 ) -> Tuple[str, str]:
+    """Build cache and metadata paths for selector configs."""
     os.makedirs(cache_dir, exist_ok=True)
     parts = [
         f"site={slugify(site)}",
@@ -252,6 +270,7 @@ def pick_selector_payload(
     module: str | None,
     page: str | None,
 ) -> Dict[str, Any] | None:
+    """Pick the best matching selector payload from API data."""
     # Normalize response payload to a list of candidates.
     candidates: Iterable[Any] = []
     if isinstance(data, dict):
@@ -316,6 +335,7 @@ def should_update_cache(
     cached_meta: Dict[str, Any],
     headers: Dict[str, Any],
 ) -> bool:
+    """Return True if cache should be refreshed based on metadata."""
     if not cached_meta:
         return True
 
@@ -341,6 +361,7 @@ def build_meta(
     page: str | None,
     endpoint: str,
 ) -> Dict[str, Any]:
+    """Build cache metadata for selector payloads."""
     return {
         "site": site,
         "environment": environment,
@@ -356,6 +377,7 @@ def build_meta(
 
 
 def parse_updated_at(value: Any) -> datetime | None:
+    """Parse updated_at values into datetime, if possible."""
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -366,11 +388,13 @@ def parse_updated_at(value: Any) -> datetime | None:
 
 
 def slugify(value: str) -> str:
+    """Normalize strings for use in cache filenames."""
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
     return cleaned or "unknown"
 
 
 def read_json_file(path: str) -> Dict[str, Any] | None:
+    """Read a JSON file and return a dict when possible."""
     if not path or not os.path.exists(path):
         return None
     try:
@@ -382,5 +406,6 @@ def read_json_file(path: str) -> Dict[str, Any] | None:
 
 
 def write_json_file(path: str, payload: Dict[str, Any]) -> None:
+    """Write a dict payload to a JSON file."""
     with open(path, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)

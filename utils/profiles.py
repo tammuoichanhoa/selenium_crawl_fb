@@ -1,10 +1,13 @@
+"""Profile directory parsing and resolution helpers."""
+
 from __future__ import annotations
 
-import os
-from typing import Any, Dict, List
+import os  # path expansion and directory listing
+from typing import Any, Dict, List  # type hints
 
 
 def parse_profile_dirs(raw_value: Any) -> List[str]:
+    """Parse profile directories from a string or list."""
     if raw_value is None:
         return []
     if isinstance(raw_value, str):
@@ -33,6 +36,7 @@ def resolve_profile_dirs(
     crawl_cfg: Dict[str, Any],
     login_cfg: Dict[str, Any],
 ) -> List[str]:
+    """Resolve profile directories from env, config, or defaults."""
     profile_dirs = parse_profile_dirs(env.get("PROFILE_DIRS"))
     if profile_dirs:
         return profile_dirs

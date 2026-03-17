@@ -1,10 +1,13 @@
+"""Environment file parsing helpers."""
+
 from __future__ import annotations
 
-import os
-from typing import Dict
+import os  # file/path checks for env loading
+from typing import Dict  # type hints for env dict
 
 
 def load_env_file(path: str = ".env") -> Dict[str, str]:
+    """Load key=value pairs from a .env-style file."""
     env: Dict[str, str] = {}
     if not os.path.exists(path):
         return env
@@ -20,6 +23,7 @@ def load_env_file(path: str = ".env") -> Dict[str, str]:
 
 
 def str_to_bool(value: str | bool | None, fallback: bool = False) -> bool:
+    """Parse common truthy/falsey values with a fallback."""
     if isinstance(value, bool):
         return value
     if value is None:

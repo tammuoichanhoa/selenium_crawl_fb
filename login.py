@@ -1,4 +1,5 @@
 import os
+import logging
 
 from utils import (
     backup_profile_folder,
@@ -7,12 +8,16 @@ from utils import (
     load_env_file,
     login_facebook_with_cookies,
     select_working_proxy,
+    setup_logging,
     terminate_chrome_process,
     verify_facebook_login_state,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
+    setup_logging()
     env = load_env_file(".env")
     cookies_raw = env.get("COOKIES", "")
     user_agent = env.get("USER_AGENT", "")
@@ -45,23 +50,23 @@ def main() -> None:
         if login_method == "cookies":
             ok = login_facebook_with_cookies(driver, cookies_raw)
             if ok:
-                print("Facebook login by cookies: SUCCESS")
+                logger.info("Facebook login by cookies: SUCCESS")
                 try:
                     archive_path = backup_profile_folder(abs_profile_dir)
-                    print(f"Profile folder saved to: {archive_path}")
+                    logger.info("Profile folder saved to: %s", archive_path)
                 except Exception as err:
-                    print(f"Failed to backup profile folder: {err}")
+                    logger.warning("Failed to backup profile folder: %s", err)
             else:
-                print("Facebook login by cookies: FAILED")
-                print("Debug info:", get_facebook_login_debug_state(driver))
+                logger.warning("Facebook login by cookies: FAILED")
+                logger.info("Debug info: %s", get_facebook_login_debug_state(driver))
 
         elif login_method == "profile":
             ok = verify_facebook_login_state(driver)
             if ok:
-                print("Facebook login via profile folder: SUCCESS")
+                logger.info("Facebook login via profile folder: SUCCESS")
             else:
-                print("Facebook login via profile folder: FAILED")
-                print("Debug info:", get_facebook_login_debug_state(driver))
+                logger.warning("Facebook login via profile folder: FAILED")
+                logger.info("Debug info: %s", get_facebook_login_debug_state(driver))
         else:
             raise ValueError(
                 "LOGIN_METHOD must be either 'cookies' or 'profile' (default 'cookies')."

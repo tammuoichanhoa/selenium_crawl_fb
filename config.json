@@ -19,47 +19,93 @@
     "output_file": "crawl_results.json"
   },
   "selectors": {
-    "site": "facebook",
-    "module": "profile",
-    "page": "about",
-    "environment": "prod",
-    "version": "1.0.0",
-    "updated_at": "2026-03-07T00:00:00Z",
-    "updated_by": "crawler-team",
-    "defaults": {
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 15000
-      }
-    },
-    "elements": {
-      "profile.page_title": {
-        "primary": { "type": "css", "value": "h1" },
-        "fallbacks": [
-          { "type": "xpath", "value": "//h1" }
-        ],
-        "wait": { "state": "visible", "timeout_ms": 15000 },
-        "attribute": "text",
-        "notes": "Ưu tiên h1, fallback xpath tổng quát"
-      },
-      "profile.followers": {
-        "primary": { "type": "xpath", "value": "//a[contains(@href,\"followers\")]" },
-        "fallbacks": [
-          { "type": "css", "value": "a[href*='followers']" }
-        ],
-        "wait": { "state": "visible", "timeout_ms": 15000 },
-        "attribute": "text"
-      },
-      "profile.recommendation_rating": {
-        "primary": {
-          "type": "xpath",
-          "value": "//span[contains(normalize-space(.),\"đề xuất\") and contains(normalize-space(.),\"lượt đánh giá\")]"
+    "modules": {
+      "page": {
+        "site": "facebook",
+        "module": "page",
+        "page": "about",
+        "environment": "dev",
+        "version": "1.0.0",
+        "updated_at": "2026-03-07T00:00:00Z",
+        "updated_by": "crawler-team",
+        "defaults": {
+          "wait": {
+            "state": "presence",
+            "timeout_ms": 15000
+          }
         },
-        "fallbacks": [
-          { "type": "xpath", "value": "//span[contains(.,\"lượt đánh giá\")]" }
-        ],
-        "wait": { "state": "presence", "timeout_ms": 15000 },
-        "attribute": "text"
+        "elements": {
+          "page.page_title": {
+            "primary": { "type": "css", "value": "h1", "priority": 6 },
+            "fallbacks": [
+              { "type": "xpath", "value": "//h1", "priority": 5 }
+            ],
+            "wait": { "state": "visible", "timeout_ms": 15000 },
+            "attribute": "text"
+          }
+        }
+      },
+      "profile": {
+        "site": "facebook",
+        "module": "profile",
+        "page": "about",
+        "environment": "dev",
+        "version": "1.0.0",
+        "updated_at": "2026-03-16T00:00:00Z",
+        "updated_by": "crawler-team",
+        "defaults": {
+          "wait": {
+            "state": "presence",
+            "timeout_ms": 15000
+          }
+        },
+        "elements": {
+          "profile.name": {
+            "primary": { "type": "tagName", "value": "h1", "priority": 6 },
+            "fallbacks": [
+              { "type": "css", "value": "h1 div[role=\"button\"]", "priority": 5 },
+              { "type": "xpath", "value": "//h1", "priority": 4 }
+            ],
+            "wait": { "state": "visible", "timeout_ms": 15000 },
+            "attribute": "text"
+          },
+          "profile.bio": {
+            "primary": {
+              "type": "css",
+              "value": "div.x9f619.x1n2onr6.x1ja2u2z.x78zum5.xdt5ytf.x2lah0s.x193iq5w.xz9dl7a.xp6pnuw.x160xiiu",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "css",
+                "value": "span.x193iq5w.xeuugli.x13faqbe.x1vvkbs.x10flsy6.x1lliihq.x1s928wv.xhkezso.x1gmr53x.x1cpjm7i.x1fgarty.x1943h6x.x4zkp8e.x41vudc.x6prxxf.xvq8zen.xo1l8bm.xzsf02u",
+                "priority": 5
+              },
+              { "type": "data-testid", "value": "profile_intro_bio", "priority": 4 },
+              { "type": "id", "value": "bio_text_container", "priority": 3 },
+              { "type": "className", "value": "x1rg5ohu x1n2onr6 x3ajldb", "priority": 2 },
+              { "type": "css", "value": "div[data-testid='profile_intro_bio']", "priority": 1 }
+            ],
+            "wait": { "state": "presence", "timeout_ms": 10000 },
+            "attribute": "text"
+          }
+        }
+      },
+      "group": {
+        "site": "facebook",
+        "module": "group",
+        "page": "about",
+        "environment": "prod",
+        "version": "1.0.0",
+        "updated_at": "2026-03-07T00:00:00Z",
+        "updated_by": "crawler-team",
+        "defaults": {
+          "wait": {
+            "state": "presence",
+            "timeout_ms": 15000
+          }
+        },
+        "elements": {}
       }
     }
   }

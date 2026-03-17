@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from typing import Any, Dict
 
 import requests
 
 from utils.env import load_env_file
+from utils.logging_setup import setup_logging
 from utils.selector_remote import login_before_download
 
 
 DEFAULT_PUT_ENDPOINT = (
     "https://gasoline-asn-protecting-pictures.trycloudflare.com/configs/auto-node"
 )
+logger = logging.getLogger(__name__)
 
 
 def load_json(path: str) -> Dict[str, Any]:
@@ -74,6 +77,7 @@ def infer_payload(
 
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="Push selector JSON to BE.")
     parser.add_argument("--file", default="config.json", help="Path to JSON file.")
     parser.add_argument(
@@ -114,11 +118,11 @@ def main() -> None:
     )
 
     # Print minimal response info for verification.
-    print("status:", response.status_code)
+    logger.info("status: %s", response.status_code)
     try:
-        print(json.dumps(response.json(), ensure_ascii=False, indent=2))
+        logger.info(json.dumps(response.json(), ensure_ascii=False, indent=2))
     except ValueError:
-        print(response.text)
+        logger.info(response.text)
 
 
 if __name__ == "__main__":

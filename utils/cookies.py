@@ -1,9 +1,12 @@
+"""Cookie parsing helpers."""
+
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List  # type hints
 
 
 def parse_cookie_string(cookie_string: str) -> List[Dict[str, str]]:
+    """Parse a Cookie header string into Selenium cookie dicts."""
     cookies: List[Dict[str, str]] = []
     for part in cookie_string.split(";"):
         part = part.strip()

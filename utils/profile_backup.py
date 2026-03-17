@@ -1,8 +1,10 @@
+"""Profile backup helper to archive Chrome profiles."""
+
 from __future__ import annotations
 
-import shutil
-import time
-from pathlib import Path
+import shutil  # build zip archives
+import time  # timestamp for archive names
+from pathlib import Path  # path utilities
 
 
 def backup_profile_folder(source_folder: str, destination_root: str = "profiles") -> str:
