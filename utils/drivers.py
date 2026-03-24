@@ -7,7 +7,7 @@ import subprocess  # spawn/terminate Chrome process
 import sys  # platform detection
 import time  # retry/sleep timing
 import logging
-from typing import List, Optional  # type hints
+from typing import List, Optional, Tuple  # type hints
 from urllib.parse import urlparse  # parse URLs for logging/host extraction
 
 from selenium import webdriver  # Selenium driver classes
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CHROME_PATH_WIN = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 DEFAULT_FB_HOME_URL = "https://www.facebook.com/"
-DEFAULT_FB_LOCALE_URL = "https://www.facebook.com/?locale=vi_VN"
+DEFAULT_FB_LOCALE_URL = "https://www.facebook.com/?locale=en_EN"
 DEFAULT_LINUX_CHROME_CANDIDATES = [
     "google-chrome",
     "google-chrome-stable",
@@ -102,6 +102,8 @@ def create_local_driver(
     app_mode: bool = False,
     proxy: Optional[str] = None,
     user_agent: Optional[str] = None,
+    window_size: Optional[Tuple[int, int]] = None,
+    window_position: Optional[Tuple[int, int]] = None,
 ) -> webdriver.Chrome:
     """Khởi tạo Chrome Driver bằng cách gọi process thật và attach Selenium qua cổng Debug."""
 
@@ -122,6 +124,7 @@ def create_local_driver(
         "--no-default-browser-check",
         "--disable-popup-blocking",
         "--disable-infobars",
+        "--lang=en-US",  # <--- THÊM DÒNG NÀY
     ]
 
     if headless:
@@ -137,13 +140,25 @@ def create_local_driver(
         cmd.append(f"--proxy-server={proxy.strip()}")
     if user_agent and user_agent.strip():
         cmd.append(f"--user-agent={user_agent.strip()}")
+        
+    if window_size:
+        w, h = window_size
+        print("w,h size",w, h)
+        cmd.append(f"--window-size={w},{400}")
+    if window_position:
+        x, y = window_position
+        print("x,y position",x, y)
+        cmd.append(f"--window-position={x},{y}")
 
     logger.info(
         "[DRIVER] Mở Chrome tại Port %s | Proxy: %s",
         port,
         "Có" if proxy else "Không",
     )
-
+    prefs = {
+        "intl.accept_languages": "en-US,en",
+    }
+    options.add_experimental_option("prefs", prefs)
     # 2. Gọi process Chrome chạy độc lập
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -257,6 +272,8 @@ def create_logged_in_driver(
     locale_url: str = DEFAULT_FB_LOCALE_URL,
     chrome_binary_win_path: str | None = None,
     chrome_binary_candidates: List[str] | None = None,
+    window_size: Optional[Tuple[int, int]] = None,
+    window_position: Optional[Tuple[int, int]] = None,
 ):
     """Create a driver and verify login via cookies or profile."""
     driver = create_local_driver(
@@ -268,6 +285,8 @@ def create_logged_in_driver(
         chrome_binary_candidates=chrome_binary_candidates,
         proxy=proxy,
         user_agent=user_agent,
+        window_size=window_size,
+        window_position=window_position,
     )
 
     try:
