@@ -7,14 +7,19 @@ import logging
 import os
 import subprocess
 import sys
+import queue
+import time
+import datetime
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
+from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from crawler import crawl_pages_batch, _normalize_selector_modules
+from crawler import _normalize_selector_modules, calculate_window_rect
 from scripts.dequeue_task import run_curl
 from utils import (
     build_port_queue,
@@ -25,13 +30,22 @@ from utils import (
     resolve_max_workers,
     resolve_profile_dirs,
     resolve_selector_payload,
-    select_working_proxy,
+    load_proxies,
     setup_logging,
     split_pages_for_workers,
     str_to_bool,
     validate_selector_payload,
+    create_logged_in_driver,
+    terminate_chrome_process,
+    get_working_proxy_from_list,
 )
 
+from fbprofile.storage.paths import compute_paths
+from fbprofile.browser.hooks import install_early_hook
+from fbprofile.browser.get_profile_info import scrape_full_profile_info
+from fbprofile.browser.navigation import go_to_date
+from fbprofile.browser.scroll import crawl_scroll_loop
+from fbprofile.storage.checkpoint import save_checkpoint
 
 DEFAULT_CONFIG_PATH = "config.json"
 logger = logging.getLogger(__name__)
@@ -75,11 +89,7 @@ def _post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, An
     ]
     response = subprocess.run(cmd, capture_output=True, text=True)
     if response.returncode != 0:
-        logger.error(
-            "[event] Failed to post task_id=%s: %s",
-            task_id,
-            response.stderr.strip(),
-        )
+        logger.error("[event] Failed to post task_id=%s: %s", task_id, response.stderr.strip())
     elif response.stdout.strip():
         logger.info("[event] Response for task_id=%s: %s", task_id, response.stdout.strip())
 
@@ -87,7 +97,7 @@ def _post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, An
 def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     items = payload.get("items")
     if not isinstance(items, list) or not items:
-        raise ValueError("Dequeue response has no items to crawl.")
+        return []
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -97,8 +107,6 @@ def _collect_uids(items: List[Dict[str, Any]]) -> List[str]:
         uid = item.get("uid")
         if isinstance(uid, str) and uid.strip():
             uids.append(uid.strip())
-    if not uids:
-        raise ValueError("No valid uid values found in dequeue items.")
     return uids
 
 
@@ -114,9 +122,7 @@ def _infer_selector_module(
     for item in items:
         types = item.get("crawl_types")
         if isinstance(types, list):
-            crawl_types.extend(
-                [str(value).lower() for value in types if value is not None]
-            )
+            crawl_types.extend([str(value).lower() for value in types if value is not None])
 
     if any("profile" in value for value in crawl_types):
         if "profile" in selector_modules:
@@ -136,6 +142,7 @@ def _infer_selector_module(
 
 
 def _load_user_agents(user_agents_file: str, fallback: str) -> List[str]:
+    import random
     user_agents: List[str] = []
     if os.path.exists(user_agents_file):
         with open(user_agents_file, "r", encoding="utf-8") as file:
@@ -145,160 +152,167 @@ def _load_user_agents(user_agents_file: str, fallback: str) -> List[str]:
                 if line.strip() and not line.lstrip().startswith("#")
             ]
         if not user_agents:
-            logger.warning(
-                "[user-agent] %s is empty; using USER_AGENT from .env",
-                user_agents_file,
-            )
+            logger.warning("[user-agent] %s is empty; using USER_AGENT from .env", user_agents_file)
     else:
-        logger.warning(
-            "[user-agent] %s not found; using USER_AGENT from .env",
-            user_agents_file,
-        )
+        logger.warning("[user-agent] %s not found; using USER_AGENT from .env", user_agents_file)
     if user_agents:
         return user_agents
     return [fallback] if fallback else []
 
 
-def _build_selector_config(
-    config: Dict[str, Any],
-    crawl_cfg: Dict[str, Any],
-    env: Dict[str, Any],
-    selector_module: str | None,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any] | None, Dict[str, Any] | None]:
-    selector_root = None
-    if isinstance(config.get("selectors"), dict):
-        selector_root = config["selectors"]
-    elif isinstance(crawl_cfg.get("selectors"), dict):
-        selector_root = crawl_cfg["selectors"]
-
-    selector_modules = _normalize_selector_modules(selector_root)
-
-    if selector_module and selector_module not in selector_modules:
-        logger.warning(
-            "[selectors] module '%s' not found in config; using fallback.",
-            selector_module,
-        )
-        selector_module = None
-
-    if selector_module is None:
-        if len(selector_modules) == 1:
-            selector_module = next(iter(selector_modules.keys()))
-        elif "page" in selector_modules:
-            selector_module = "page"
-        elif selector_modules:
-            selector_module = next(iter(selector_modules.keys()))
-
-    local_selector = (
-        selector_modules.get(selector_module)
-        if selector_modules
-        else selector_root
+def crawl_profiles_batch(
+    worker_id: int,
+    indexed_pages: List[Tuple[int, str]],
+    login_method: str,
+    cookies_raw: str,
+    user_agents: List[str],
+    user_agent_fallback: str,
+    user_agent_rotation: bool,
+    headless: bool,
+    max_workers: int,
+    profile_dir: str,
+    proxy_candidates: List[str],
+    proxy_rotation: bool,
+    chrome_binary: str | None,
+    chrome_binary_win_path: str | None,
+    chrome_binary_candidates: List[str] | None,
+    fb_home_url: str | None,
+    fb_locale_url: str | None,
+    port_queue: queue.Queue[int],
+    data_root: str,
+) -> List[Tuple[int, Dict[str, Any]]]:
+    import random
+    profile_label = profile_dir or "cookies-session"
+    logger.info(
+        f"[worker {worker_id}] Starting fbprofile interception for {len(indexed_pages)} task(s) "
+        f"using {profile_label}"
     )
 
-    selector_payload = None
-    selector_debug_cfg: Dict[str, Any] | None = None
-    default_wait_cfg: Dict[str, Any] | None = None
-    selector_source = "none"
+    debug_port = port_queue.get()
+    
+    if user_agent_rotation and user_agents:
+        user_agent = random.choice(user_agents)
+    elif user_agents: user_agent = user_agents[0]
+    else: user_agent = user_agent_fallback
+        
+    proxy = get_working_proxy_from_list(proxy_candidates, rotate=proxy_rotation) if proxy_candidates else None
+    
+    window_size, window_pos = calculate_window_rect(worker_id, max_workers)
 
-    resolved_payload, selector_source = resolve_selector_payload(local_selector, env)
-    if resolved_payload is not None:
+    driver = None
+    try:
         try:
-            selector_payload = validate_selector_payload(resolved_payload)
-        except ValueError as exc:
-            logger.warning(
-                "[selectors] invalid selector payload from %s: %s",
-                selector_source,
-                exc,
+            driver = create_logged_in_driver(
+                login_method=login_method,
+                cookies_raw=cookies_raw,
+                user_agent=user_agent,
+                headless=headless,
+                profile_dir=profile_dir,
+                proxy=proxy,
+                chrome_binary=chrome_binary,
+                debug_port=debug_port,
+                home_url=fb_home_url or "https://www.facebook.com/",
+                locale_url=fb_locale_url or "https://www.facebook.com/?locale=en_EN",
+                chrome_binary_win_path=chrome_binary_win_path,
+                chrome_binary_candidates=chrome_binary_candidates,
+                window_size=window_size,
+                window_position=window_pos,
             )
-            if local_selector and local_selector is not resolved_payload:
-                selector_payload = validate_selector_payload(local_selector)
-                selector_source = "local"
-            else:
-                raise
+        except Exception as exc:
+            logger.error("[worker %s] Login failed: %s", worker_id, exc)
+            return [(index, {"uid": uid, "error": f"login_failed: {exc}"}) for index, uid in indexed_pages]
 
-    if selector_payload is not None:
-        selector_debug_cfg = {}
-        if isinstance(selector_payload.get("debug"), dict):
-            selector_debug_cfg.update(selector_payload["debug"])
-        if isinstance(selector_payload.get("defaults"), dict):
-            defaults_debug = selector_payload["defaults"].get("debug")
-            if isinstance(defaults_debug, dict):
-                selector_debug_cfg.update(defaults_debug)
-        if "SELECTOR_DEBUG" in env:
-            selector_debug_cfg["enabled"] = str_to_bool(env.get("SELECTOR_DEBUG"))
-        if "SELECTOR_LOG_CONFIG" in env:
-            selector_debug_cfg["log_config"] = str_to_bool(env.get("SELECTOR_LOG_CONFIG"))
-        if "SELECTOR_CAPTURE" in env:
-            selector_debug_cfg["capture_on_fail"] = str_to_bool(env.get("SELECTOR_CAPTURE"))
-        if "SELECTOR_CAPTURE_DIR" in env:
-            selector_debug_cfg["capture_dir"] = env.get("SELECTOR_CAPTURE_DIR")
+        results = []
+        keep_last = 350
+        MAX_STALL_RETRIES = 3
 
-        if not selector_debug_cfg:
-            selector_debug_cfg = None
+        for position, (index, uid_or_url) in enumerate(indexed_pages):
+            group_url = uid_or_url
+            if not group_url.startswith("http"):
+                group_url = f"https://www.facebook.com/{uid_or_url}"
 
-        default_wait_cfg = (
-            selector_payload.get("defaults", {}).get("wait")
-            if isinstance(selector_payload.get("defaults"), dict)
-            else None
-        )
-        raw_elements_cfg = selector_payload.get("elements", selector_payload)
-    else:
-        raw_elements_cfg = crawl_cfg.get("elements", [])
-
-    elements_cfg = normalize_elements_config(raw_elements_cfg)
-
-    locator_guard_cfg = None
-    if selector_payload and isinstance(selector_payload.get("defaults"), dict):
-        locator_guard_cfg = selector_payload["defaults"].get("locator_guard")
-
-    locator_guard_mode = None
-    if isinstance(locator_guard_cfg, dict):
-        locator_guard_mode = (
-            locator_guard_cfg.get("mode")
-            or locator_guard_cfg.get("level")
-            or locator_guard_cfg.get("severity")
-        )
-    elif isinstance(locator_guard_cfg, str):
-        locator_guard_mode = locator_guard_cfg
-
-    locator_guard_mode = env.get("LOCATOR_GUARD") or locator_guard_mode or "warn"
-    guard_fragile_locators(elements_cfg, locator_guard_mode)
-
-    if selector_payload and selector_debug_cfg:
-        debug_enabled = selector_debug_cfg.get("enabled")
-        if debug_enabled is None:
-            debug_enabled = bool(
-                selector_debug_cfg.get("log_config")
-                or selector_debug_cfg.get("capture_on_fail")
-            )
-        if debug_enabled:
-            version = selector_payload.get("version") or "unknown"
-            site = selector_payload.get("site") or "unknown"
-            module = selector_payload.get("module") or "unknown"
-            page = selector_payload.get("page") or "unknown"
-            env_name = selector_payload.get("environment") or "unknown"
-            logger.info(
-                "[selectors] Using selector config "
-                "site=%s module=%s page=%s env=%s version=%s source=%s",
-                site,
-                module,
-                page,
-                env_name,
-                version,
-                selector_source,
-            )
-            if selector_debug_cfg.get("log_config", True):
-                logger.info(
-                    "[selectors] Config:\n%s",
-                    json.dumps(selector_payload, ensure_ascii=False, indent=2),
+            try:
+                page_name = str(uid_or_url).split('/')[-1].split('?')[0]
+                if not page_name: page_name = str(uid_or_url)
+                
+                database_path, out_ndjson, raw_dumps_dir, checkpoint = compute_paths(
+                    Path(data_root).resolve(), page_name, ""
                 )
+                profile_info_path = database_path / "profile_info.json"
 
-    if not elements_cfg:
-        raise ValueError(
-            "No elements configured. Please add elements under selectors.elements "
-            "in config.json or under crawl.elements (legacy)."
-        )
+                install_early_hook(driver, keep_last=keep_last)
+                scrape_full_profile_info(driver, group_url, profile_info_path)
 
-    return elements_cfg, default_wait_cfg, selector_debug_cfg
+                driver.get(group_url)
+                time.sleep(1.5)
+                
+                target_date = datetime.date.today()
+                if "group" not in group_url:
+                    try:
+                        go_to_date(driver, target_date)
+                    except Exception as e:
+                        logger.warning("[worker %s] Không thể click 'Bộ lọc' ngày tháng (bỏ qua & tiếp tục scroll): %s", worker_id, str(e).split('\n')[0])
+
+                seen_ids = set()
+                stall_retry_count = 0
+                current_target_date = target_date
+                
+                ts_state = {"latest": None, "earliest": None}
+
+                while True:
+                    stopped_due_to_stall = crawl_scroll_loop(
+                        driver,
+                        group_url=group_url,
+                        out_path=out_ndjson,
+                        seen_ids=seen_ids,
+                        keep_last=keep_last,
+                        max_scrolls=10000,
+                        ts_state=ts_state,
+                    )
+
+                    if not stopped_due_to_stall:
+                        break
+
+                    stall_retry_count += 1
+                    if stall_retry_count >= MAX_STALL_RETRIES:
+                        break
+
+                    if ts_state["earliest"] is None:
+                        break
+
+                    new_date = datetime.datetime.fromtimestamp(ts_state["earliest"]).date()
+                    current_target_date = new_date
+
+                if ts_state["latest"] is not None:
+                    save_checkpoint(checkpoint, ts_state["latest"])
+
+                profile_data = {}
+                if profile_info_path.exists():
+                    try:
+                        with open(profile_info_path, "r", encoding="utf-8") as f:
+                            profile_data = json.load(f)
+                    except: pass
+                
+                page_data = {
+                    "uid": uid_or_url,
+                    "profile_info": profile_data,
+                    "posts_collected": len(seen_ids),
+                    "output_ndjson": str(out_ndjson)
+                }
+
+            except Exception as exc:
+                logger.warning("[worker %s] Failed on %s: %s\n%s", worker_id, uid_or_url, exc, traceback.format_exc())
+                page_data = {"uid": uid_or_url, "error": str(exc)}
+
+            results.append((index, page_data))
+
+        return results
+    finally:
+        if driver is not None:
+            driver.quit()
+            terminate_chrome_process(driver)
+        port_queue.put(debug_port)
+        logger.info("[worker %s] Finished (port %s)", worker_id, debug_port)
 
 
 def _crawl_from_uids(
@@ -308,8 +322,8 @@ def _crawl_from_uids(
     selector_module: str | None,
     max_workers_override: int | None,
 ) -> List[Dict[str, Any]]:
-    crawl_cfg = config["crawl"]
-    login_cfg = config["login"]
+    crawl_cfg = config.get("crawl", {})
+    login_cfg = config.get("login", {})
 
     env = load_env_file(".env")
     cookies_raw = env.get("COOKIES", "")
@@ -327,7 +341,9 @@ def _crawl_from_uids(
     fb_home_url = env.get("FB_HOME_URL", "").strip() or None
     fb_locale_url = env.get("FB_LOCALE_URL", "").strip() or None
     proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
-    proxy = select_working_proxy(env.get("PROXY"), proxies_file)
+    proxy_candidates = load_proxies(env.get("PROXY"), proxies_file)
+    proxy_rotation = str_to_bool(env.get("PROXY_ROTATION"), crawl_cfg.get("proxy_rotation", False))
+    user_agent_rotation = str_to_bool(env.get("USER_AGENT_ROTATION"), crawl_cfg.get("user_agent_rotation", True))
 
     login_method = (
         env.get("LOGIN_METHOD")
@@ -344,17 +360,10 @@ def _crawl_from_uids(
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
 
-    elements_cfg, default_wait_cfg, selector_debug_cfg = _build_selector_config(
-        config,
-        crawl_cfg,
-        env,
-        selector_module,
-    )
-
     configured_max_workers = (
         max_workers_override
         if max_workers_override is not None
-        else env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(uids))
+        else int(env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(uids)))
     )
     max_workers = resolve_max_workers(
         configured_max_workers,
@@ -378,29 +387,26 @@ def _crawl_from_uids(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                crawl_pages_batch,
+                crawl_profiles_batch,
                 worker_id,
                 batch,
                 login_method=login_method,
                 cookies_raw=cookies_raw,
                 user_agents=user_agents,
                 user_agent_fallback=user_agent,
+                user_agent_rotation=user_agent_rotation,
                 headless=headless,
+                max_workers=max_workers,
                 profile_dir=profile_dirs[(worker_id - 1) % len(profile_dirs)],
-                proxy=proxy or None,
+                proxy_candidates=proxy_candidates,
+                proxy_rotation=proxy_rotation,
                 chrome_binary=chrome_binary,
                 chrome_binary_win_path=chrome_binary_win_path,
                 chrome_binary_candidates=chrome_binary_candidates,
                 fb_home_url=fb_home_url,
                 fb_locale_url=fb_locale_url,
                 port_queue=port_queue,
-                elements_cfg=elements_cfg,
-                wait_after_load=wait_after_load,
-                wait_between_pages=wait_between_pages,
-                element_timeout=element_timeout,
-                login_stagger_seconds=login_stagger_seconds,
-                default_wait_cfg=default_wait_cfg,
-                selector_debug_cfg=selector_debug_cfg,
+                data_root=str(Path(PROJECT_ROOT) / "database")
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]
@@ -415,7 +421,7 @@ def _crawl_from_uids(
 def main() -> int:
     setup_logging()
     parser = argparse.ArgumentParser(
-        description="Dequeue tasks and crawl using uid links from the response.",
+        description="Dequeue tasks and crawl using uid links from the response, using fbprofile mechanisms.",
     )
     parser.add_argument(
         "--api-key",
@@ -434,6 +440,11 @@ def main() -> int:
         help="Selector module to use (overrides inference).",
     )
     parser.add_argument(
+        "--test-uid",
+        dest="test_uid",
+        help="Cung cấp UID để chạy chế độ test mà không cần gọi API xếp hàng đợi.",
+    )
+    parser.add_argument(
         "--out",
         help="Optional output JSON file to write crawl results.",
     )
@@ -444,19 +455,33 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.api_key:
-        logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
-        return 2
+    if args.test_uid:
+        logger.info("[TEST MODE] Bỏ qua gọi API Queue, dùng trực tiếp UID: %s", args.test_uid)
+        items = [{"task_id": "test_id_999", "uid": args.test_uid, "social_type": "facebook", "crawl_types": ["profile"]}]
+        uids = [args.test_uid]
+        print(">>>>>>>>>>>>>> Processing UIDs (Test Mode):", uids)
+    else:
+        if not args.api_key:
+            logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
+            return 2
 
-    result = run_curl(args.api_key)
-    if result.returncode != 0:
-        logger.error("Dequeue request failed: %s", result.stderr.strip())
-        return result.returncode
+        result = run_curl(args.api_key)
+        if result.returncode != 0:
+            logger.error("Dequeue request failed: %s", result.stderr.strip())
+            return result.returncode
 
-    payload = _parse_dequeue_payload(result.stdout or "")
-    items = _extract_items(payload)
-    uids = _collect_uids(items)
-    print(">>>>>>>>>>>>>>", uids)
+        payload = _parse_dequeue_payload(result.stdout or "")
+        items = _extract_items(payload)
+        if not items:
+            logger.info("Hàng đợi (Queue) hiện đang trống. Không có tài khoản nào cần cào.")
+            return 0
+
+        uids = _collect_uids(items)
+        if not uids:
+            logger.info("Không tìm thấy thuộc tính 'uid' hợp lệ trong các item. Kết thúc an toàn.")
+            return 0
+
+        print(">>>>>>>>>>>>>> Processing UIDs:", uids)
 
     config = load_config(DEFAULT_CONFIG_PATH)
     selector_root = None
