@@ -1,0 +1,665 @@
+# post/v3/graphql/extractors.py
+import re
+from typing import List, Optional
+from urllib.parse import urlparse, parse_qs
+
+from ..config import POST_URL_RE
+from .parser import deep_collect_timestamps
+from ..utils import _norm_link 
+
+REACTION_KEYS = {
+    "LIKE": "like", "LOVE": "love", "HAHA": "haha", "WOW": "wow",
+    "SAD": "sad", "ANGRY": "angry", "CARE": "care"
+}
+
+def _deep_iter(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k, v
+            if isinstance(v, (dict, list)):
+                yield from _deep_iter(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _deep_iter(v)
+
+def deep_get_first(obj, want_keys):
+    want = {k.lower() for k in want_keys}
+    for k, v in _deep_iter(obj):
+        if isinstance(k, str) and k.lower() in want:
+            return k, v
+    return None, None
+
+def extract_author(n):
+    actor = None
+    if isinstance(n.get("actors"), list) and n["actors"]:
+        actor = n["actors"][0]
+    elif isinstance(n.get("author"), dict):
+        actor = n["author"]
+    if not isinstance(actor, dict):
+        actor = {}
+
+    name = actor.get("name") or actor.get("title") or actor.get("text")
+    aid  = actor.get("id")
+    link = actor.get("url") or actor.get("wwwURL") or actor.get("profile_url")
+
+    # avatar
+    avatar = None
+    try:
+        avatar = actor.get("profile_picture", {}).get("uri")
+    except:
+        pass
+    if not avatar:
+        for k, v in _deep_iter(actor):
+            if k in ("uri", "url") and isinstance(v, str) and v.startswith("http"):
+                avatar = v; break
+
+    # entity type -> label "facebook page/profile/group"
+    raw_t = actor.get("__typename") or actor.get("typename") or ""
+    raw_t = (raw_t or "").lower()
+    if "page" in raw_t:
+        etype = "facebook page"
+    elif "user" in raw_t or "profile" in raw_t:
+        etype = "facebook profile"
+    elif "group" in raw_t:
+        etype = "facebook group"
+    else:
+        etype = "story"
+
+    return aid, name, link, avatar, etype
+
+def extract_media(n):
+    """Trả về (image_urls[], video_urls[])"""
+    image_urls, video_urls = [], []
+
+    # 1) Ảnh – giữ nguyên logic cũ
+    for k, v in _deep_iter(n):
+        if k in ("image", "previewImage", "photo_image", "preferred_thumbnail"):
+            if isinstance(v, dict):
+                uri = v.get("uri") or v.get("url")
+                if isinstance(uri, str) and uri.startswith("http"):
+                    if uri not in image_urls:
+                        image_urls.append(uri)
+
+    # 2) Video kiểu cũ (post thường)
+    for k, v in _deep_iter(n):
+        if k in ("playable_url_quality_hd", "playable_url",
+                 "browser_native_hd_url", "browser_native_sd_url"):
+            if isinstance(v, str) and v.startswith("http"):
+                if v not in video_urls:
+                    video_urls.append(v)
+
+    # 3) Video kiểu REEL / kiểu mới (như JSON ông dán)
+    # tìm block videoDeliveryResponseFragment
+    for k, v in _deep_iter(n):
+        if k == "videoDeliveryResponseFragment" and isinstance(v, dict):
+            res = v.get("videoDeliveryResponseResult") or {}
+            # 3.1 progressive_urls -> đây chính là link mp4 ông muốn
+            prog_list = res.get("progressive_urls") or []
+            for item in prog_list:
+                url = item.get("progressive_url")
+                if isinstance(url, str) and url.startswith("http"):
+                    if url not in video_urls:
+                        video_urls.append(url)
+
+            # 3.2 nếu muốn lưu luôn dash_manifest_urls thì lấy ở đây
+            # dash_list = res.get("dash_manifest_urls") or []
+            # for item in dash_list:
+            #     murl = item.get("manifest_url")
+            #     if isinstance(murl, str) and murl.startswith("http"):
+            #         if murl not in video_urls:
+            #             video_urls.append(murl)
+
+    return image_urls, video_urls
+
+
+
+# --- [1] BỔ SUNG: map id → reaction key (hay gặp trên Comet UFI)
+REACTION_ID_MAP = {
+    # core set
+    "1635855486666999": "like",     # Thích / Like
+    "1678524932434102": "love",     # Yêu thích / Love
+    "115940658764963":  "haha",     # Haha
+    "478547315650144":  "wow",      # Wow
+    "908563459236466":  "sad",      # Buồn / Sad
+    "444813342392137":  "angry",    # Phẫn nộ / Angry
+    # (CARE ít xuất hiện trong top_reactions mới — FB thay đổi theo thời điểm)
+}
+
+# --- [2] BỔ SUNG: chuẩn hoá localized_name → reaction key
+def _norm_reaction_name(name: str) -> str | None:
+    if not isinstance(name, str): 
+        return None
+    s = name.strip().lower()
+    mapping = {
+        "thích": "like", "like": "like",
+        "yêu thích": "love", "yêu": "love", "love": "love",
+        "haha": "haha",
+        "wow": "wow",
+        "buồn": "sad", "sad": "sad",
+        "phẫn nộ": "angry", "giận dữ": "angry", "angry": "angry",
+        "care": "care", "quan tâm": "care",
+    }
+    return mapping.get(s)
+# --- [3] REPLACE: extract_reactions_and_counts với hỗ trợ đầy đủ UFI (new + old)
+def extract_reactions_and_counts(n):
+    """
+    Trích xuất reactions / comment / share từ cả kiểu cũ (UFI cũ) lẫn kiểu mới (Comet):
+      - feedback.reaction_count.count
+      - feedback.top_reactions.edges[].node.{id|localized_name} + reaction_count
+      - share_count.count hoặc i18n_share_count (string)
+      - comment_rendering_instance.comments.total_count
+      - (fallback) total_comment_count, comment_count, display_comments_count, ...
+    Trả về dict: {"like","love","haha","wow","sad","angry","care","comment","share"}
+    """
+    counts = {v: 0 for v in REACTION_KEYS.values()}
+    counts.update({"comment": 0, "share": 0})
+
+    # ---- A) SHARE (new style + fallback string)
+    for k, v in _deep_iter(n):
+        if k == "share_count" and isinstance(v, dict):
+            c = v.get("count")
+            if isinstance(c, int):
+                counts["share"] = max(counts["share"], c)
+        if k == "i18n_share_count":  # "1.2K", "5"...
+            try:
+                s = str(v).replace(".", "").replace(",", "")
+                # FB VN thường dùng "." làm thousand sep trong i18n — ta gỡ hết
+                c = int(s)
+                counts["share"] = max(counts["share"], c)
+            except:
+                pass
+        # Kiểu cũ (đôi khi có nguyên int):
+        if k in ("sharecount", "resharesCount") and isinstance(v, int):
+            counts["share"] = max(counts["share"], v)
+
+    # ---- B) COMMENT (đủ pattern)
+    # 1) Comet summary renderer (mới)
+    #    comet_ufi_summary_and_actions_renderer.feedback.comment_rendering_instance.comments.total_count
+    total_cmt = 0
+    for k, v in _deep_iter(n):
+        if k == "comments_count_summary_renderer" and isinstance(v, dict):
+            fb = v.get("feedback") or {}
+            # path 1: như JSON bạn gửi
+            cri = fb.get("comment_rendering_instance") or {}
+            comments = cri.get("comments") or {}
+            tc = comments.get("total_count")
+            if isinstance(tc, int):
+                total_cmt = max(total_cmt, tc)
+            # path 2: đôi khi đặt tên khác
+            tlc = cri.get("top_level_comments") or {}
+            tc2 = tlc.get("count")
+            if isinstance(tc2, int):
+                total_cmt = max(total_cmt, tc2)
+
+    # 2) Rải rác ở các field khác (fallback)
+    for k, v in _deep_iter(n):
+        if k in ("total_comment_count", "comment_count", "commentsCount", "display_comments_count"):
+            if isinstance(v, int):
+                total_cmt = max(total_cmt, v)
+        # Có nơi wrap thành dict {count: <int>}
+        if k == "comment_count" and isinstance(v, dict):
+            c = v.get("count")
+            if isinstance(c, int):
+                total_cmt = max(total_cmt, c)
+        if k == "i18n_comment_count":
+            try:
+                c = int(str(v).replace(".", "").replace(",", ""))
+                total_cmt = max(total_cmt, c)
+            except:
+                pass
+    counts["comment"] = max(counts["comment"], total_cmt)
+
+    # ---- C) REACTIONS (new style breakdown + total)
+    found_breakdown = False
+    # 1) breakdown mới: top_reactions.edges[].node.{id|localized_name} + reaction_count
+    for k, v in _deep_iter(n):
+        if k == "top_reactions" and isinstance(v, dict):
+            edges = v.get("edges") or []
+            for e in edges:
+                if not isinstance(e, dict): 
+                    continue
+                node = (e.get("node") or {})
+                rid  = node.get("id")
+                rname= node.get("localized_name")
+                rkey = None
+                if isinstance(rid, str) and rid in REACTION_ID_MAP:
+                    rkey = REACTION_ID_MAP[rid]
+                if not rkey and rname:
+                    rkey = _norm_reaction_name(rname)
+                rc = e.get("reaction_count")
+                if rkey in REACTION_KEYS.values() and isinstance(rc, int):
+                    counts[rkey] = max(counts[rkey], rc)
+                    found_breakdown = True
+
+    # 2) tổng (new style): reaction_count.count
+    total_any = 0
+    for k, v in _deep_iter(n):
+        if k == "reaction_count" and isinstance(v, dict):
+            c = v.get("count")
+            if isinstance(c, int):
+                total_any = max(total_any, c)
+    if total_any and not found_breakdown:
+        # fallback: nếu không có breakdown thì dồn vào 'like' (giữ hành vi cũ)
+        counts["like"] = max(counts["like"], total_any)
+
+    # ---- D) REACTIONS (kiểu cũ list [reactionType/key]:count/total_count)
+    for _k, v in _deep_iter(n):
+        if isinstance(v, list) and v and isinstance(v[0], dict) and (
+            ("reactionType" in v[0] and "count" in v[0]) or
+            ("key" in v[0] and "total_count" in v[0])
+        ):
+            for it in v:
+                rtype = (it.get("reactionType") or it.get("key") or "")
+                cnt = it.get("count") if "count" in it else it.get("total_count")
+                if isinstance(rtype, str):
+                    rtype = rtype.upper()
+                if rtype in REACTION_KEYS and isinstance(cnt, int):
+                    counts[REACTION_KEYS[rtype]] = max(counts[REACTION_KEYS[rtype]], cnt)
+
+    return counts
+
+
+def extract_created_time(n):
+    t = n.get("creation_time") or n.get("created_time") or n.get("creationTime")
+    if not t:
+        for k, v in _deep_iter(n):
+            if k in ("creation_time", "created_time", "creationTime") and isinstance(v, (int, float, str)):
+                t = v; break
+    try:
+        return int(t)
+    except:
+        return t
+
+
+HASHTAG_RE = re.compile(r"(#\w+)", re.UNICODE)
+def extract_hashtags(text):
+    if not isinstance(text, str): return []
+    tags = [t.lower() for t in HASHTAG_RE.findall(text)]
+    # unique, stable order by lowercase
+    seen, out = set(), []
+    for t in tags:
+        if t not in seen:
+            out.append(t); seen.add(t)
+    return out
+
+from urllib.parse import urlparse
+URL_RE = re.compile(r'https?://[^\s)>\]"]+', re.I)
+
+FB_HOSTS = {
+    "facebook.com","www.facebook.com","m.facebook.com","web.facebook.com",
+    "fb.watch","fb.me","fb.com"
+}
+def _clean_url(u:str)->str:
+    if not isinstance(u,str): return ""
+    u=u.strip()
+    # bỏ dấu ')' hoặc '…' dư ở cuối
+    return u.rstrip(').,]»›…')
+
+def _is_fb(u:str)->bool:
+    try:
+        host = urlparse(u).netloc.lower()
+        host = host.split(":")[0]
+        return any(host==h or host.endswith("."+h) for h in FB_HOSTS)
+    except: 
+        return False
+
+def _all_urls_from_text(s: str):
+    if not isinstance(s,str) or not s: return []
+    urls = [ _clean_url(m.group(0)) for m in URL_RE.finditer(s) ]
+    # unique, giữ thứ tự
+    seen=set(); out=[]
+    for u in urls:
+        if u not in seen:
+            out.append(u); seen.add(u)
+    return out
+
+def _dig_attachment_urls(n:dict):
+    """
+    Lục các URL trong attachments/shareable để lấy OG meta.
+    Trả về (urls, meta) với meta có og_title/og_desc/site_name nếu có.
+    """
+    urls, meta = [], {}
+    def take(u):
+        u=_clean_url(u)
+        if u and u not in urls:
+            urls.append(u)
+
+    def dive(x):
+        if isinstance(x, dict):
+            # các key hay chứa URL
+            for k in ("url","canonical_url","source","href","permalink_url","external_url"):
+                v=x.get(k)
+                if isinstance(v,str): take(v)
+            # OG-esque meta
+            for (k1,k2) in (("title","og_title"),("subtitle","og_desc"),("site_name","og_site_name"),("publisher","og_site_name")):
+                if isinstance(x.get(k1), dict) and isinstance(x[k1].get("text"), str):
+                    meta.setdefault(k2, x[k1]["text"].strip())
+                elif isinstance(x.get(k1), str):
+                    meta.setdefault(k2, x[k1].strip())
+
+            for v in x.values(): dive(v)
+        elif isinstance(x, list):
+            for v in x: dive(v)
+    dive(n)
+    return urls, meta
+
+def extract_share_flags_smart(n: dict, actor_text: str = None):
+    """
+    Trả về: (is_share, link_share, type_share, origin_id, share_meta)
+    - link_share: ưu tiên URL 'ngoài FB'. Nếu không có → nếu share bài FB thì trả permalink FB.
+    - type_share: 'link' nếu out-domain, 'post' nếu là share nội bộ FB.
+    - origin_id: id bài gốc nếu tóm được
+    - share_meta: {og_title, og_desc, og_site_name} nếu có
+    """
+    is_share, link_share, type_share, origin_id = False, None, None, None
+    share_meta = {}
+
+    cs = n.get("comet_sections") or {}
+    # 1) cố nhìn attached/content story (nếu share)
+    cand_nodes = []
+    if isinstance(cs, dict):
+        for k in ("attached_story","content","context_layout"):
+            v = cs.get(k)
+            if isinstance(v, dict):
+                cand_nodes.append(v)
+                if isinstance(v.get("story"), dict):
+                    cand_nodes.append(v["story"])
+
+    # 2) attachments các kiểu
+    if isinstance(n.get("attachments"), (list,dict)):
+        cand_nodes.append(n["attachments"])
+    if isinstance(n.get("story_attachment"), dict):
+        cand_nodes.append(n["story_attachment"])
+
+    # gom URL + meta trong attachments
+    att_urls = []
+    for node in cand_nodes:
+        u, meta = _dig_attachment_urls(node)
+        att_urls.extend(u)
+        share_meta.update({k:v for k,v in meta.items() if v})
+
+    # 3) URL trong caption
+    text_urls = _all_urls_from_text(actor_text or "")
+
+    # 4) hợp nhất ứng viên URL
+    all_urls = []
+    for arr in (text_urls, att_urls):
+        for u in arr:
+            if u not in all_urls:
+                all_urls.append(u)
+
+    # 5) quyết định link_share/type_share
+    # ưu tiên link ngoài FB
+    ext = [u for u in all_urls if not _is_fb(u)]
+    if ext:
+        link_share = ext[0]
+        type_share = "link"
+        is_share = True
+    else:
+        # fallback: nếu có permalink/canonical FB của bài đính kèm → share post
+        fb_urls = [u for u in all_urls if _is_fb(u)]
+        if fb_urls:
+            link_share = fb_urls[0]
+            type_share = "post"
+            is_share = True
+
+    # 6) origin_id (nếu mò thấy)
+    for node in cand_nodes:
+        if isinstance(node, dict):
+            for key in ("id","post_id","legacy_api_post_id","shareable_id","target_id"):
+                val = node.get(key)
+                if isinstance(val, str) and val.isdigit():
+                    origin_id = val; break
+        if origin_id: break
+
+    return is_share, link_share, type_share, origin_id, share_meta
+# =========================
+# Post collectors (ưu tiên rid + link + created_time)
+# =========================
+def _is_story_node(n: dict) -> bool:
+    if n.get("__typename") == "Story": return True
+    if n.get("__isFeedUnit") == "Story": return True
+    if "post_id" in n or "comet_sections" in n: return True
+    return False
+
+def _looks_like_group_post(n: dict) -> bool:
+    if not _is_story_node(n): return False
+    url = n.get("wwwURL") or n.get("url") or ""
+    pid = n.get("id") or ""
+    if POST_URL_RE.match(url): return True
+    if (isinstance(pid, str) and pid.startswith("Uzpf")) or n.get("post_id"): return True
+    return False
+
+def _extract_url_digits(url: str) -> Optional[str]:
+    if not url: return None
+    try:
+        path = urlparse(url).path.lower()
+    except:
+        path = url.lower()
+    m = re.search(r"/(?:reel|posts|permalink)/(\d+)", path)
+    if m: return m.group(1)
+    qs = parse_qs(urlparse(url).query)
+    for k in ("fbid","story_fbid","video_id","photo_id","id","v"):
+        v = qs.get(k)
+        if v and v[0] and v[0].isdigit():
+            return v[0]
+    return None
+
+def _dig_text(o):
+    texts = []
+    def take(x):
+        if isinstance(x, str):
+            t = x.strip()
+            if t and t.lower() not in {"see more", "xem thêm"}:
+                texts.append(t)
+    def dive(v):
+        if isinstance(v, dict):
+            if "text" in v and isinstance(v["text"], str): take(v["text"])
+            if "message" in v and isinstance(v["message"], dict):
+                if isinstance(v["message"].get("text"), str): take(v["message"]["text"])
+            if "body" in v and isinstance(v["body"], dict):
+                if isinstance(v["body"].get("text"), str): take(v["body"]["text"])
+            if "savable_description" in v and isinstance(v["savable_description"], dict):
+                if isinstance(v["savable_description"].get("text"), str): take(v["savable_description"]["text"])
+            for k in ("title", "subtitle", "headline", "label", "contextual_message"):
+                val = v.get(k)
+                if isinstance(val, dict) and isinstance(val.get("text"), str): take(val["text"])
+                elif isinstance(val, str): take(val)
+            for vv in v.values(): dive(vv)
+        elif isinstance(v, list):
+            for it in v: dive(it)
+    dive(o)
+    uniq, seen = [], set()
+    for t in texts:
+        if t not in seen:
+            uniq.append(t); seen.add(t)
+    return uniq
+
+def _extract_share_texts(n: dict):
+    actor_texts, attached_texts = [], []
+    if isinstance(n.get("message"), dict) and isinstance(n["message"].get("text"), str):
+        actor_texts.append(n["message"]["text"])
+    cs = n.get("comet_sections") or {}
+    if isinstance(cs, dict):
+        msg = cs.get("message")
+        if isinstance(msg, dict):
+            t = msg.get("text")
+            if isinstance(t, str) and t.strip():
+                actor_texts.append(t)
+        attached = cs.get("attached_story") or cs.get("content") or {}
+        if isinstance(attached, dict):
+            story = attached.get("story") if isinstance(attached.get("story"), dict) else attached
+            if isinstance(story, dict):
+                if isinstance(story.get("message"), dict) and isinstance(story["message"].get("text"), str):
+                    attached_texts.append(story["message"]["text"])
+                attached_texts.extend(_dig_text(story))
+    if not actor_texts:
+        actor_texts.extend(_dig_text(n))
+    def _uniq_keep(seq):
+        out, seen = [], set()
+        for s in seq:
+            s2 = s.strip()
+            if s2 and s2 not in seen:
+                out.append(s2); seen.add(s2)
+        return out
+    actor_texts = _uniq_keep(actor_texts)
+    attached_texts = _uniq_keep(attached_texts)
+    if actor_texts and attached_texts:
+        combined = actor_texts[0]
+        if combined not in attached_texts:
+            combined = combined + "\n\n" + attached_texts[0]
+    elif actor_texts:
+        combined = actor_texts[0]
+    elif attached_texts:
+        combined = attached_texts[0]
+    else:
+        combined = None
+    return (actor_texts[0] if actor_texts else None,
+            attached_texts[0] if attached_texts else None,
+            combined)
+
+def filter_only_feed_posts(items):
+    keep = []
+    for it in items or []:
+        link = (it.get("link") or "").strip()
+        fb_id = (it.get("id") or "").strip()
+        rid = (it.get("rid") or "").strip()
+        if rid or (link and POST_URL_RE.match(link)) or (fb_id and fb_id.startswith("Uzpf")):
+            keep.append(it)
+    return keep
+
+
+# =========================
+# Post collectors (ưu tiên rid + link + created_time)
+# =========================
+
+def collect_post_summaries(obj, out, group_url):
+    if isinstance(obj, dict):
+        if _looks_like_group_post(obj):
+            post_id_api = obj.get("post_id")
+            fb_id      = obj.get("id")
+            url        = obj.get("wwwURL") or obj.get("url")
+            url_digits = _extract_url_digits(url)
+            rid        = post_id_api or url_digits or fb_id
+            author_id, author_name, author_link, avatar, type_label = extract_author(obj)
+
+            actor_text, attached_text, text_combined = _extract_share_texts(obj)
+            image_urls, video_urls = extract_media(obj)
+            counts = extract_reactions_and_counts(obj)
+            smart_is_share, smart_link, smart_type, origin_id, share_meta = extract_share_flags_smart(obj, actor_text or text_combined)
+            created_candidates = deep_collect_timestamps(obj)
+            created = max(created_candidates) if created_candidates else extract_created_time(obj)
+
+            hashtags = extract_hashtags(text_combined)
+            out_links = list(dict.fromkeys(_all_urls_from_text(text_combined or "") + _dig_attachment_urls(obj)[0]))
+            out_domains = []
+            for u in out_links:
+                try:
+                    host = urlparse(u).netloc.lower().split(":")[0]
+                    if host: out_domains.append(host)
+                except: pass
+            out_domains = list(dict.fromkeys(out_domains))
+            source_id = None
+            _k, _v = deep_get_first(obj, {"group_id", "groupID", "groupIDV2"})
+            if _v: source_id = _v
+            if not source_id:
+                try:
+                    slug = re.search(r"/groups/([^/?#]+)", group_url).group(1)
+                    source_id = slug
+                except:
+                    pass
+
+            item = {
+                "id": fb_id,
+                "rid": rid,
+                "type": type_label,
+                "link": url,
+                "author_id": author_id,
+                "author": author_name,
+                "author_link": author_link,
+                "avatar": avatar,
+                "created_time": created,
+                "content": text_combined,
+                "image_url": image_urls,
+                "like": counts["like"],
+                "comment": counts["comment"],
+                "haha": counts["haha"],
+                "wow": counts["wow"],
+                "sad": counts["sad"],
+                "love": counts["love"],
+                "angry": counts["angry"],
+                "care": counts["care"],
+                "share": counts["share"],
+                "hashtag": hashtags,
+                "video": video_urls,
+                "source_id": source_id,
+                "is_share": smart_is_share,
+                "link_share": smart_link,
+                "type_share": smart_type,
+                "origin_id": origin_id,
+                "out_links": out_links,
+                "out_domains": out_domains,
+            }
+            if share_meta:
+                item["share_meta"] = share_meta
+            if smart_is_share:
+                item["content_parts"] = {
+                    "actor_text": actor_text,
+                    "attached_text": attached_text
+                }
+            out.append(item)
+        for v in obj.values():
+            collect_post_summaries(v, out, group_url)
+    elif isinstance(obj, list):
+        for v in obj:
+            collect_post_summaries(v, out, group_url)
+
+# =========================
+# Dedupe/merge (rid + normalized link)
+# =========================
+
+def _all_join_keys(it: dict) -> List[str]:
+    keys, seen = [], set()
+    for k in (it.get("rid"), it.get("id"), _extract_url_digits(it.get("link") or ""), _norm_link(it.get("link") or "")):
+        if isinstance(k, str) and k and (k not in seen):
+            keys.append(k); seen.add(k)
+    return keys
+
+def _best_primary_key(it: dict) -> Optional[str]:
+    rid = it.get("rid"); link = it.get("link"); _id = it.get("id")
+    digits = _extract_url_digits(link) if link else None
+    norm   = _norm_link(link) if link else None
+    for k in (rid, _id, digits, norm):
+        if isinstance(k, str) and k.strip(): return k.strip()
+    return None
+
+def merge_two_posts(a: dict, b: dict) -> dict:
+    if not a: return b or {}
+    if not b: return a or {}
+    m = dict(a)
+    m["id"]   = m.get("id")   or b.get("id")
+    m["rid"]  = m.get("rid")  or b.get("rid")
+    m["link"] = m.get("link") or b.get("link")
+    ca, cb = m.get("created_time"), b.get("created_time")
+    try:
+        m["created_time"] = max(int(ca) if ca else 0, int(cb) if cb else 0) or (ca or cb)
+    except: m["created_time"] = ca or cb
+    return m
+
+def coalesce_posts(items: List[dict]) -> List[dict]:
+    groups, key2group, seq = {}, {}, 0
+    def _new_gid():
+        nonlocal seq; seq += 1; return f"g{seq}"
+    for it in (items or []):
+        keys = _all_join_keys(it)
+        gid = None
+        for k in keys:
+            if k in key2group:
+                gid = key2group[k]; break
+        if gid is None:
+            gid = _new_gid(); groups[gid] = it
+        else:
+            groups[gid] = merge_two_posts(groups[gid], it)
+        for k in _all_join_keys(groups[gid]):
+            key2group[k] = gid
+    return list(groups.values())
