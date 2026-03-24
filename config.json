@@ -11,7 +11,9 @@
     "wait_after_load": 3,
     "wait_between_pages": 2,
     "element_timeout": 15,
-    "output_file": "crawl_results.json"
+    "output_file": "crawl_results.json",
+    "user_agent_rotation": true,
+    "proxy_rotation": false
   },
   "selectors": {
     "modules": {
