@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os  # read proxies file
 import logging
+import random
 from typing import List  # type hints
 from urllib.parse import urlparse  # validate proxy scheme
 
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROXIES_FILE = "proxies.txt"
 
 
-def _iter_proxy_candidates(primary_proxy: str | None, proxies_file: str) -> List[str]:
+def load_proxies(primary_proxy: str | None, proxies_file: str) -> List[str]:
     """Collect proxy candidates from env and proxies file."""
     candidates: List[str] = []
     seen: set[str] = set()
@@ -42,7 +43,7 @@ def _proxy_supports_requests(proxy_url: str) -> bool:
     """Return True if the proxy scheme is supported by requests."""
     parsed = urlparse(proxy_url)
     scheme = (parsed.scheme or "http").lower()
-    return scheme in {"http", "https"}
+    return scheme in {"http", "https", "socks4", "socks5", "socks5h"}
 
 
 def _validate_proxy_with_requests(proxy_url: str, test_url: str, timeout: float) -> bool:
@@ -57,23 +58,39 @@ def _validate_proxy_with_requests(proxy_url: str, test_url: str, timeout: float)
         return False
 
 
+def get_working_proxy_from_list(
+    candidates: List[str],
+    test_url: str = "https://www.facebook.com/",
+    timeout: float = 8.0,
+    rotate: bool = False,
+) -> str | None:
+    """Return the first proxy from the list that passes a health check."""
+    if not candidates:
+        return None
+
+    testing_list = list(candidates)
+    if rotate:
+        random.shuffle(testing_list)
+
+    for candidate in testing_list:
+        if not _proxy_supports_requests(candidate):
+            logger.warning("[proxy] Skipping unsupported proxy scheme: %s", candidate)
+            continue
+        if _validate_proxy_with_requests(candidate, test_url, timeout):
+            logger.info("[proxy] Using proxy (rotate=%s): %s", rotate, candidate)
+            return candidate
+        logger.warning("[proxy] Proxy failed health check: %s", candidate)
+
+    logger.warning("[proxy] No working proxy found in candidate list")
+    return None
+
+
 def select_working_proxy(
     env_proxy: str | None = None,
     proxies_file: str = DEFAULT_PROXIES_FILE,
     test_url: str = "https://www.facebook.com/",
     timeout: float = 8.0,
 ) -> str | None:
-    """Return the first proxy that passes a health check."""
-    # Pick the first proxy that passes a health check via requests.
-
-    for candidate in _iter_proxy_candidates(env_proxy, proxies_file):
-        if not _proxy_supports_requests(candidate):
-            logger.warning("[proxy] Skipping unsupported proxy scheme: %s", candidate)
-            continue
-        if _validate_proxy_with_requests(candidate, test_url, timeout):
-            logger.info("[proxy] Using proxy: %s", candidate)
-            return candidate
-        logger.warning("[proxy] Proxy failed health check: %s", candidate)
-
-    logger.warning("[proxy] No working proxy found; continuing without proxy")
-    return None
+    """Backward compatible: load proxies and return first working one."""
+    candidates = load_proxies(env_proxy, proxies_file)
+    return get_working_proxy_from_list(candidates, test_url, timeout, rotate=False)
