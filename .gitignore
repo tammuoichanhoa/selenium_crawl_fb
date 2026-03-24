@@ -1,26 +1,7 @@
-# Env / secrets
-.env
-*.env
-.env.*
-!.env.example
-
-# Python
+# Python bytecode/cache
 __pycache__/
 *.py[cod]
-*.so
-*.egg-info/
-.eggs/
-build/
-dist/
-pip-wheel-metadata/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-.tox/
-.nox/
-.pytype/
+*$py.class
 
 # Virtual environments
 .venv/
@@ -28,28 +9,46 @@ venv/
 env/
 ENV/
 
-# Logs
-*.log
-logs/
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
 
-# OS / editor
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE / OS
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/
-*.swp
-*.swo
 
-# Selenium profiles / artifacts
-chrome_profile*/
-profiles/
-debug_artifacts/
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
 
-# Runtime outputs / sensitive
-crawl_results*.json
+# Runtime logs and temp files
+*.log
+*.tmp
+tmp/
+
+# Project-specific generated data
+output/
+chrome_profiles/
+
+# Optional local data files (uncomment if you do not want to track them)
+# cookies.txt
+# proxies.txt
+# user_agents.txt
 cookies.txt
-
-
-docs/*
-others/
 database
+chrome_profile_*
