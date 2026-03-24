@@ -148,6 +148,7 @@ def crawl_pages_batch(
     login_stagger_seconds: int,
     default_wait_cfg: Dict[str, Any] | None,
     selector_debug_cfg: Dict[str, Any] | None,
+    profile_backup_name: str | None = None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
     logger.info(
@@ -188,6 +189,7 @@ def crawl_pages_batch(
                 locale_url=fb_locale_url or "https://www.facebook.com/?locale=vi_VN",
                 chrome_binary_win_path=chrome_binary_win_path,
                 chrome_binary_candidates=chrome_binary_candidates,
+                profile_backup_name=profile_backup_name,
             )
         except Exception as exc:
             logger.error("[worker %s] Login failed: %s", worker_id, exc)

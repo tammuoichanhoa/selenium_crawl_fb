@@ -485,7 +485,7 @@ def extract_element(
     debug_cfg: Dict[str, Any] | None = None,
 ) -> str | None:
     """Extract element text/attribute using locator chain and waits."""
-    print(">>>>>>>>>>>", element_cfg)
+    # print(">>>>>>>>>>>", element_cfg)
     attr = element_cfg.get("attribute", "text")
     required = element_cfg.get("required", False)
     name = element_cfg.get("name") or element_cfg.get("selector") or "unknown"

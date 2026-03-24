@@ -1,0 +1,257 @@
+{
+  "login": {
+    "method": "cookies",
+    "headless": false,
+    "profile_dir": "./chrome_profile"
+  },
+  "crawl": {
+    "pages_file": "pages.txt",
+    "max_workers": 3,
+    "login_stagger_seconds": 2,
+    "wait_after_load": 3,
+    "wait_between_pages": 2,
+    "element_timeout": 15,
+    "output_file": "crawl_results.json"
+  },
+  "selectors": {
+    "modules": {
+      "page": {
+        "site": "facebook",
+        "module": "page",
+        "page": "about",
+        "environment": "dev",
+        "version": "1.0.0",
+        "updated_at": "2026-03-07T00:00:00Z",
+        "updated_by": "crawler-team",
+        "defaults": {
+          "wait": {
+            "state": "presence",
+            "timeout_ms": 15000
+          }
+        },
+        "elements": {
+          "page.page_title": {
+            "primary": { "type": "css", "value": "h1", "priority": 6 },
+            "fallbacks": [
+              { "type": "xpath", "value": "//h1", "priority": 5 }
+            ],
+            "wait": { "state": "visible", "timeout_ms": 15000 },
+            "attribute": "text"
+          }
+        }
+      },
+      "profile": {
+        "site": "facebook",
+        "module": "profile",
+        "page": "about",
+        "environment": "dev",
+        "version": "1.0.0",
+        "updated_at": "2026-03-16T00:00:00Z",
+        "updated_by": "crawler-team",
+        "defaults": {
+          "wait": {
+            "state": "presence",
+            "timeout_ms": 15000
+          }
+        },
+        "elements": {
+          "profile.name": {
+            "primary": {
+              "type": "tagName",
+              "value": "h1",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "xpath",
+                "value": "//h1",
+                "priority": 5
+              },
+              {
+                "type": "css",
+                "value": "h1 span",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "visible",
+              "timeout_ms": 15000
+            },
+            "attribute": "text"
+          },
+
+          "profile.avatar": {
+            "primary": {
+              "type": "xpath",
+              "value": "//*[name()='svg'][@role='img']//*[name()='image']",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "css",
+                "value": "image[xlink\\:href]",
+                "priority": 5
+              },
+              {
+                "type": "xpath",
+                "value": "//img[contains(@src,'fbcdn.net')]",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "presence",
+              "timeout_ms": 10000
+            },
+            "attribute": "href"
+          },
+
+          "profile.cover": {
+            "primary": {
+              "type": "xpath",
+              "value": "//img[@data-imgperflogname='profileCoverPhoto']",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "xpath",
+                "value": "//img[contains(@src,'fbcdn.net')]",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "visible",
+              "timeout_ms": 10000
+            },
+            "attribute": "src"
+          },
+
+          "profile.friends_count": {
+            "primary": {
+              "type": "xpath",
+              "value": "//a[contains(@href, 'friends')]//strong",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "xpath",
+                "value": "//a[contains(@href,'friends')]//span",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "visible",
+              "timeout_ms": 8000
+            },
+            "attribute": "text"
+          },
+
+          "profile.followers_count": {
+            "primary": {
+              "type": "xpath",
+              "value": "//a[contains(@href, 'followers')]//strong",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "xpath",
+                "value": "//a[contains(@href,'followers')]//span",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "visible",
+              "timeout_ms": 8000
+            },
+            "attribute": "text"
+          },
+
+          "profile.following_count": {
+            "primary": {
+              "type": "xpath",
+              "value": "//a[contains(@href, 'following')]//strong",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "xpath",
+                "value": "//a[contains(@href,'following')]//span",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "visible",
+              "timeout_ms": 8000
+            },
+            "attribute": "text"
+          },
+
+          "profile.bio": {
+            "primary": {
+              "type": "data-testid",
+              "value": "profile_intro_bio",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "css",
+                "value": "div[data-testid='profile_intro_bio']",
+                "priority": 5
+              },
+              {
+                "type": "xpath",
+                "value": "//div[contains(@class,'x1gslohp')]//span",
+                "priority": 4
+              },
+              {
+                "type": "css",
+                "value": "span.x193iq5w",
+                "priority": 3
+              }
+            ],
+            "wait": {
+              "state": "presence",
+              "timeout_ms": 10000
+            },
+            "attribute": "text"
+          },
+
+          "profile.photos": {
+            "primary": {
+              "type": "xpath",
+              "value": "//a[contains(@href, 'photo.php')]//img",
+              "priority": 6
+            },
+            "fallbacks": [
+              {
+                "type": "xpath",
+                "value": "//img[contains(@src,'fbcdn.net')]",
+                "priority": 4
+              }
+            ],
+            "wait": {
+              "state": "presence",
+              "timeout_ms": 10000
+            },
+            "attribute": "src"
+          }
+        }
+      },
+      "group": {
+        "site": "facebook",
+        "module": "group",
+        "page": "about",
+        "environment": "prod",
+        "version": "1.0.0",
+        "updated_at": "2026-03-07T00:00:00Z",
+        "updated_by": "crawler-team",
+        "defaults": {
+          "wait": {
+            "state": "presence",
+            "timeout_ms": 15000
+          }
+        },
+        "elements": {}
+      }
+    }
+  }
+}

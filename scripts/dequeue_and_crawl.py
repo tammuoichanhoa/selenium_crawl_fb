@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -36,6 +36,7 @@ from utils import (
 DEFAULT_CONFIG_PATH = "config.json"
 logger = logging.getLogger(__name__)
 DEFAULT_EVENTS_URL = "https://gasoline-asn-protecting-pictures.trycloudflare.com/events"
+DEFAULT_ACCOUNT_COOKIES_FILE = "V1CM69c1f0b094cbc.txt"
 
 
 def _parse_dequeue_payload(raw: str) -> Dict[str, Any]:
@@ -100,6 +101,54 @@ def _collect_uids(items: List[Dict[str, Any]]) -> List[str]:
     if not uids:
         raise ValueError("No valid uid values found in dequeue items.")
     return uids
+
+
+def _extract_account_uid(item: Dict[str, Any]) -> str | None:
+    account = item.get("account")
+    if isinstance(account, dict):
+        account_uid = account.get("uid")
+        if account_uid is not None:
+            return str(account_uid).strip() or None
+    return None
+
+
+def _extract_account_cookie(
+    item: Dict[str, Any],
+    account_cookies: Dict[str, str],
+) -> str | None:
+    account = item.get("account")
+    if isinstance(account, dict):
+        cookies_value = account.get("cookies")
+        if isinstance(cookies_value, str) and cookies_value.strip():
+            return cookies_value.strip()
+        uid = account.get("uid")
+        if uid is not None:
+            lookup = account_cookies.get(str(uid).strip())
+            if lookup:
+                return lookup
+    return None
+
+
+def _load_account_cookies(path: str | None) -> Dict[str, str]:
+    cookies: Dict[str, str] = {}
+    if not path:
+        return cookies
+    if not os.path.exists(path):
+        logger.warning("[account] Cookies file not found: %s", path)
+        return cookies
+    with open(path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("|")
+            if len(parts) < 6:
+                continue
+            uid = parts[0].strip()
+            cookie_value = parts[5].strip()
+            if uid and cookie_value:
+                cookies[uid] = cookie_value
+    return cookies
 
 
 def _infer_selector_module(
@@ -307,12 +356,14 @@ def _crawl_from_uids(
     config: Dict[str, Any],
     selector_module: str | None,
     max_workers_override: int | None,
+    cookies_override: str | None = None,
+    profile_backup_name: str | None = None,
 ) -> List[Dict[str, Any]]:
     crawl_cfg = config["crawl"]
     login_cfg = config["login"]
 
     env = load_env_file(".env")
-    cookies_raw = env.get("COOKIES", "")
+    cookies_raw = cookies_override or env.get("COOKIES", "")
     user_agent = env.get("USER_AGENT", "")
     user_agents_file = env.get("USER_AGENTS_FILE", "user_agents.txt").strip() or "user_agents.txt"
     user_agents = _load_user_agents(user_agents_file, user_agent)
@@ -401,6 +452,7 @@ def _crawl_from_uids(
                 login_stagger_seconds=login_stagger_seconds,
                 default_wait_cfg=default_wait_cfg,
                 selector_debug_cfg=selector_debug_cfg,
+                profile_backup_name=profile_backup_name if worker_id == 1 else None,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]
@@ -455,8 +507,10 @@ def main() -> int:
 
     payload = _parse_dequeue_payload(result.stdout or "")
     items = _extract_items(payload)
-    uids = _collect_uids(items)
-    print(">>>>>>>>>>>>>>", uids)
+    env = load_env_file(".env")
+    #@anhtb temp cookies for test
+    account_cookies_file = env.get("ACCOUNT_COOKIES_FILE") or DEFAULT_ACCOUNT_COOKIES_FILE
+    account_cookies = _load_account_cookies(account_cookies_file)
 
     config = load_config(DEFAULT_CONFIG_PATH)
     selector_root = None
@@ -465,24 +519,56 @@ def main() -> int:
     selector_modules = _normalize_selector_modules(selector_root)
     inferred_module = _infer_selector_module(items, selector_modules, args.selector_module)
 
-    results = _crawl_from_uids(
-        uids,
-        config=config,
-        selector_module=inferred_module,
-        max_workers_override=args.max_workers,
-    )
-
     response_items: List[Dict[str, Any]] = []
-    for item, page_result in zip(items, results):
-        response_items.append(
-            {
-                "task_id": item.get("task_id"),
-                "uid": item.get("uid"),
-                "social_type": item.get("social_type"),
-                "crawl_types": item.get("crawl_types"),
-                "result": page_result,
-            }
+    grouped_items: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        account_uid = _extract_account_uid(item)
+        account_cookie = _extract_account_cookie(item, account_cookies)
+        print(">>>>>>>>>>>>>>>>>>", account_uid, account_cookie)
+        if account_uid and not account_cookie:
+            logger.warning(
+                "[account] No cookies found for account uid=%s; falling back to .env COOKIES.",
+                account_uid,
+            )
+        group_key = account_uid or "__default__"
+        group = grouped_items.setdefault(
+            group_key,
+            {"account_uid": account_uid, "cookies": account_cookie, "items": []},
         )
+        if account_cookie and not group.get("cookies"):
+            group["cookies"] = account_cookie
+        elif (
+            account_cookie
+            and group.get("cookies")
+            and account_cookie != group.get("cookies")
+        ):
+            logger.warning(
+                "[account] Multiple cookies for account uid=%s; keeping the first one.",
+                account_uid,
+            )
+        group["items"].append(item)
+
+    for group in grouped_items.values():
+        group_items = group["items"]
+        uids = _collect_uids(group_items)
+        results = _crawl_from_uids(
+            uids,
+            config=config,
+            selector_module=inferred_module,
+            max_workers_override=args.max_workers,
+            cookies_override=group.get("cookies"),
+            profile_backup_name=group.get("account_uid"),
+        )
+        for item, page_result in zip(group_items, results):
+            response_items.append(
+                {
+                    "task_id": item.get("task_id"),
+                    "uid": item.get("uid"),
+                    "social_type": item.get("social_type"),
+                    "crawl_types": item.get("crawl_types"),
+                    "result": page_result,
+                }
+            )
 
     output = {
         "count": len(response_items),

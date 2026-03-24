@@ -5,9 +5,19 @@ from __future__ import annotations
 import shutil  # build zip archives
 import time  # timestamp for archive names
 from pathlib import Path  # path utilities
+import re  # simple slugging
 
 
-def backup_profile_folder(source_folder: str, destination_root: str = "profiles") -> str:
+def _sanitize_archive_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return cleaned.strip("._-")
+
+
+def backup_profile_folder(
+    source_folder: str,
+    destination_root: str = "profiles",
+    archive_name: str | None = None,
+) -> str:
     """Archive a browser profile directory so it can be downloaded locally.
 
     Args:
@@ -28,8 +38,15 @@ def backup_profile_folder(source_folder: str, destination_root: str = "profiles"
     destination_dir = Path(destination_root).expanduser().resolve()
     destination_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    archive_stem = destination_dir / f"profile_backup_{timestamp}"
+    archive_stem: Path
+    if archive_name:
+        safe_name = _sanitize_archive_name(archive_name)
+        if safe_name:
+            archive_stem = destination_dir / safe_name
+        else:
+            archive_stem = destination_dir / f"profile_backup_{time.strftime('%Y%m%d_%H%M%S')}"
+    else:
+        archive_stem = destination_dir / f"profile_backup_{time.strftime('%Y%m%d_%H%M%S')}"
     archive_path = shutil.make_archive(
         str(archive_stem),
         "zip",

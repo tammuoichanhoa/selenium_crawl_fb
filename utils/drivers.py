@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import os  # process inspection
 import shutil  # find Chrome binary on PATH
+import signal  # terminate/kill by pid
 import subprocess  # spawn/terminate Chrome process
 import sys  # platform detection
 import time  # retry/sleep timing
 import logging
-from typing import List, Optional  # type hints
+from typing import Iterable, List, Optional, Tuple  # type hints
 from urllib.parse import urlparse  # parse URLs for logging/host extraction
 
 from selenium import webdriver  # Selenium driver classes
 from selenium.webdriver.chrome.options import Options  # Chrome option builder
 from .cookies import parse_cookie_string  # cookie header parsing
+from .profile_backup import backup_profile_folder
 from .waits import wait_for_page_ready, wait_for_seconds  # explicit wait helpers
 
 logger = logging.getLogger(__name__)
@@ -81,15 +84,152 @@ def _terminate_process(proc: subprocess.Popen, timeout: int = 5) -> None:
         proc.wait(timeout=timeout)
 
 
+def _iter_process_cmdlines() -> Iterable[Tuple[int, str]]:
+    """Yield (pid, cmdline) for running processes, best-effort across platforms."""
+    if sys.platform.startswith("linux"):
+        for pid_str in os.listdir("/proc"):
+            if not pid_str.isdigit():
+                continue
+            pid = int(pid_str)
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                    raw = handle.read()
+                if not raw:
+                    continue
+                cmdline = raw.replace(b"\x00", b" ").decode(errors="ignore").strip()
+                if cmdline:
+                    yield pid, cmdline
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+        return
+
+    if sys.platform.startswith("darwin"):
+        try:
+            out = subprocess.check_output(
+                ["ps", "-axo", "pid=,command="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid_str, cmdline = parts
+            if pid_str.isdigit():
+                yield int(pid_str), cmdline
+        return
+
+    if sys.platform.startswith("win"):
+        try:
+            out = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Get-CimInstance Win32_Process | "
+                        "Select-Object ProcessId,CommandLine | "
+                        "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+                    ),
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            pid_str, cmdline = parts
+            if pid_str.isdigit():
+                yield int(pid_str), cmdline
+        return
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_pids(pids: Iterable[int], timeout: int = 5) -> None:
+    pids = [pid for pid in pids if isinstance(pid, int) and pid > 0]
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+
+    deadline = time.time() + timeout
+    remaining = {pid for pid in pids if _pid_exists(pid)}
+    while remaining and time.time() < deadline:
+        remaining = {pid for pid in remaining if _pid_exists(pid)}
+        if remaining:
+            time.sleep(0.2)
+
+    if not remaining:
+        return
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+
+
+def _find_chrome_pids(profile_path: Optional[str], port: Optional[int]) -> List[int]:
+    """Find Chrome PIDs that belong to this crawler based on unique flags."""
+    markers: List[str] = []
+    if profile_path:
+        markers.append(f"--user-data-dir={profile_path}")
+    if port is not None:
+        markers.append(f"--remote-debugging-port={port}")
+    if not markers:
+        return []
+
+    pids: List[int] = []
+    for pid, cmdline in _iter_process_cmdlines():
+        cmd_lower = cmdline.lower()
+        if "chrome" not in cmd_lower and "chromium" not in cmd_lower:
+            continue
+        if all(marker in cmdline for marker in markers):
+            pids.append(pid)
+    return pids
+
+
 def terminate_chrome_process(driver: webdriver.Chrome, timeout: int = 5) -> None:
     """Terminate the Chrome process attached to a Selenium driver."""
     proc = getattr(driver, "_chrome_process", None)
-    if proc is None:
-        return
+    profile_path = getattr(driver, "_chrome_profile_path", None)
+    port = getattr(driver, "_chrome_debug_port", None)
+    pid = getattr(driver, "_chrome_pid", None)
     try:
-        _terminate_process(proc, timeout=timeout)
+        if proc is not None:
+            _terminate_process(proc, timeout=timeout)
+            return
     except Exception:
         pass
+
+    # Fallback: find and terminate Chrome by unique crawler flags.
+    if pid:
+        _terminate_pids([pid], timeout=timeout)
+        return
+    pids = _find_chrome_pids(profile_path, port)
+    _terminate_pids(pids, timeout=timeout)
 
 
 def create_local_driver(
@@ -172,6 +312,9 @@ def create_local_driver(
         _terminate_process(proc)
         raise
     driver._chrome_process = proc
+    driver._chrome_profile_path = profile_path
+    driver._chrome_debug_port = port
+    driver._chrome_pid = proc.pid
 
     return driver
 
@@ -257,6 +400,7 @@ def create_logged_in_driver(
     locale_url: str = DEFAULT_FB_LOCALE_URL,
     chrome_binary_win_path: str | None = None,
     chrome_binary_candidates: List[str] | None = None,
+    profile_backup_name: str | None = None,
 ):
     """Create a driver and verify login via cookies or profile."""
     driver = create_local_driver(
@@ -288,6 +432,11 @@ def create_logged_in_driver(
                 "Unable to verify Facebook login. "
                 f"Facebook redirected the session: {debug_state}"
             )
+        if profile_backup_name:
+            try:
+                backup_profile_folder(profile_dir, archive_name=profile_backup_name)
+            except Exception as exc:
+                logger.warning("Failed to backup profile folder: %s", exc)
         if locale_url:
             driver.get(locale_url)
             wait_for_page_ready(driver, 20)
