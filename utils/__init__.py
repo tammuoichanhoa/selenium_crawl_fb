@@ -18,7 +18,12 @@ from .pages import read_pages, resolve_max_workers, split_pages_for_workers
 from .ports import build_port_queue, is_port_free
 from .profile_backup import backup_profile_folder
 from .profiles import parse_profile_dirs, resolve_profile_dirs
-from .proxies import DEFAULT_PROXIES_FILE, select_working_proxy
+from .proxies import (
+    DEFAULT_PROXIES_FILE,
+    get_working_proxy_from_list,
+    load_proxies,
+    select_working_proxy,
+)
 from .selectors import (
     build_locator_chain,
     extract_element,
@@ -49,9 +54,11 @@ __all__ = [
     "extract_element",
     "guard_fragile_locators",
     "get_facebook_login_debug_state",
+    "get_working_proxy_from_list",
     "is_port_free",
     "load_config",
     "load_env_file",
+    "load_proxies",
     "login_facebook_with_cookies",
     "normalize_elements_config",
     "parse_cookie_string",
