@@ -56,3 +56,6 @@ chrome_profile_*
 data/proxies.txt
 data/cookie_string.txt
 .env
+profiles/
+chrome_profile/
+chrome_profile_/
