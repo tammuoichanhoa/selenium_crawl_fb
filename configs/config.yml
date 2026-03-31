@@ -1,13 +1,13 @@
 login:
   profile_path: chrome_profiles/facebook
   profile_name: Default
-  cookies_file: cookies.txt
-  user_agents_file: user_agents.txt
-  proxies_file: proxies.txt
+  cookies_file: data/cookies.txt
+  user_agents_file: data/user_agents.txt
+  proxies_file: data/proxies.txt
 
 crawl:
-  pages_file: pages.txt
-  output_file: output/pages_data.json
+  pages_file: data/pages.txt
+  output_file: outputs/pages_data.json
   page_wait_seconds: 4
   field_timeout: 25
 

@@ -484,6 +484,10 @@ def main() -> None:
 
     results = [indexed_results[index] for index in range(len(pages))]
 
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     with open(output_file, "w", encoding="utf-8") as file:
         json.dump(results, file, ensure_ascii=False, indent=2)
     logger.info(

@@ -5,13 +5,13 @@
     "profile_dir": "./chrome_profile"
   },
   "crawl": {
-    "pages_file": "pages.txt",
+    "pages_file": "data/pages.txt",
     "max_workers": 3,
     "login_stagger_seconds": 2,
     "wait_after_load": 3,
     "wait_between_pages": 2,
     "element_timeout": 15,
-    "output_file": "crawl_results.json",
+    "output_file": "outputs/crawl_results.json",
     "user_agent_rotation": true,
     "proxy_rotation": false
   },
