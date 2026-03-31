@@ -19,35 +19,28 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from crawler import _normalize_selector_modules, calculate_window_rect
+from src.crawler.engine import _normalize_selector_modules
 from scripts.dequeue_task import run_curl
-from utils import (
-    build_port_queue,
-    guard_fragile_locators,
-    load_config,
-    load_env_file,
-    normalize_elements_config,
-    resolve_max_workers,
-    resolve_profile_dirs,
-    resolve_selector_payload,
-    load_proxies,
-    setup_logging,
-    split_pages_for_workers,
-    str_to_bool,
-    validate_selector_payload,
-    create_logged_in_driver,
-    terminate_chrome_process,
-    get_working_proxy_from_list,
-)
+from src.utils.ports import build_port_queue
+from src.core.selectors import guard_fragile_locators, normalize_elements_config, validate_selector_payload
+from src.core.config_parser import load_config
+from src.utils.env import load_env_file, str_to_bool
+from src.utils.pages import resolve_max_workers, split_pages_for_workers
+from src.utils.profiles import resolve_profile_dirs
+from src.core.selector_remote import resolve_selector_payload
+from src.utils.proxies import load_proxies
+from src.utils.logging_setup import setup_logging
+from src.core.driver_factory import create_logged_in_driver, terminate_chrome_process
+from src.utils.proxies import load_proxies, get_working_proxy_from_list
 
-from fbprofile.storage.paths import compute_paths
-from fbprofile.browser.hooks import install_early_hook
-from fbprofile.browser.get_profile_info import scrape_full_profile_info
-from fbprofile.browser.navigation import go_to_date
-from fbprofile.browser.scroll import crawl_scroll_loop
-from fbprofile.storage.checkpoint import save_checkpoint
+from src.fbprofile.storage.paths import compute_paths
+from src.fbprofile.browser.hooks import install_early_hook
+from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
+from src.fbprofile.browser.navigation import go_to_date
+from src.fbprofile.browser.scroll import crawl_scroll_loop
+from src.fbprofile.storage.checkpoint import save_checkpoint
 
-DEFAULT_CONFIG_PATH = "config.json"
+DEFAULT_CONFIG_PATH = "configs/config.json"
 logger = logging.getLogger(__name__)
 DEFAULT_EVENTS_URL = "https://gasoline-asn-protecting-pictures.trycloudflare.com/events"
 
@@ -197,8 +190,8 @@ def crawl_profiles_batch(
         
     proxy = get_working_proxy_from_list(proxy_candidates, rotate=proxy_rotation) if proxy_candidates else None
     
-    window_size, window_pos = calculate_window_rect(worker_id, max_workers)
-
+    window_size = None
+    window_pos = None
     driver = None
     try:
         try:
@@ -247,6 +240,7 @@ def crawl_profiles_batch(
                 time.sleep(1.5)
                 
                 target_date = datetime.date.today()
+                
                 if "group" not in group_url:
                     try:
                         go_to_date(driver, target_date)
@@ -328,7 +322,7 @@ def _crawl_from_uids(
     env = load_env_file(".env")
     cookies_raw = env.get("COOKIES", "")
     user_agent = env.get("USER_AGENT", "")
-    user_agents_file = env.get("USER_AGENTS_FILE", "user_agents.txt").strip() or "user_agents.txt"
+    user_agents_file = env.get("USER_AGENTS_FILE", "data/user_agents.txt").strip() or "data/user_agents.txt"
     user_agents = _load_user_agents(user_agents_file, user_agent)
     chrome_binary = env.get("CHROME_BINARY", "").strip() or None
     chrome_binary_win_path = env.get("CHROME_BINARY_WIN_PATH", "").strip() or None
@@ -340,7 +334,7 @@ def _crawl_from_uids(
     )
     fb_home_url = env.get("FB_HOME_URL", "").strip() or None
     fb_locale_url = env.get("FB_LOCALE_URL", "").strip() or None
-    proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
+    proxies_file = env.get("PROXIES_FILE", "data/proxies.txt").strip() or "data/proxies.txt"
     proxy_candidates = load_proxies(env.get("PROXY"), proxies_file)
     proxy_rotation = str_to_bool(env.get("PROXY_ROTATION"), crawl_cfg.get("proxy_rotation", False))
     user_agent_rotation = str_to_bool(env.get("USER_AGENT_ROTATION"), crawl_cfg.get("user_agent_rotation", True))
@@ -454,7 +448,7 @@ def main() -> int:
         help="Events endpoint URL to post completion payload.",
     )
     args = parser.parse_args()
-
+    args.test_uid = "cambongda"
     if args.test_uid:
         logger.info("[TEST MODE] Bỏ qua gọi API Queue, dùng trực tiếp UID: %s", args.test_uid)
         items = [{"task_id": "test_id_999", "uid": args.test_uid, "social_type": "facebook", "crawl_types": ["profile"]}]

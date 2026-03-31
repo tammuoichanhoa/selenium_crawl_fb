@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Tuple  # type hints
 
 import requests  # HTTP requests to selector service
 
-from .env import str_to_bool  # env flag parsing
+from src.utils.env import str_to_bool  # env flag parsing
 
 logger = logging.getLogger(__name__)
 

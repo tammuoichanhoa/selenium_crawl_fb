@@ -1,17 +1,17 @@
 import os
 import logging
 
-from utils import (
-    backup_profile_folder,
+from src.utils.profile_backup import backup_profile_folder
+from src.core.driver_factory import (
     create_local_driver,
     get_facebook_login_debug_state,
-    load_env_file,
     login_facebook_with_cookies,
-    select_working_proxy,
-    setup_logging,
     terminate_chrome_process,
     verify_facebook_login_state,
 )
+from src.utils.env import load_env_file
+from src.utils.proxies import select_working_proxy
+from src.utils.logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def main() -> None:
     profile_dir = env.get("PROFILE_DIR", "").strip() or os.path.join(
         os.getcwd(), "chrome_profile"
     )
-    proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
+    proxies_file = env.get("PROXIES_FILE", "data/proxies.txt").strip() or "data/proxies.txt"
     proxy = select_working_proxy(env.get("PROXY"), proxies_file)
 
     # Tạo thư mục profile nếu chưa có

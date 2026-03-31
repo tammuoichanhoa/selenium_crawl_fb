@@ -5,23 +5,24 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-from utils import (
-    build_port_queue,
-    create_logged_in_driver,
-    load_env_file,
-    read_pages,
-    setup_logging,
-    terminate_chrome_process,
-    wait_for_page_ready,
-    wait_for_seconds,
-)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from src.utils.ports import build_port_queue
+from src.core.driver_factory import create_logged_in_driver, terminate_chrome_process
+from src.utils.env import load_env_file
+from src.utils.pages import read_pages
+from src.utils.logging_setup import setup_logging
+from src.utils.waits import wait_for_page_ready, wait_for_seconds
 
 
-DEFAULT_PAGES_FILE = "profiles.txt"
+DEFAULT_PAGES_FILE = "data/profiles.txt"
 DEFAULT_OUTPUT_DIR = os.path.join("debug_artifacts", "html_pages")
 DEFAULT_WAIT_AFTER_LOAD = 3
 DEFAULT_WAIT_BETWEEN_PAGES = 2

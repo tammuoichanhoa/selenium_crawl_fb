@@ -4,13 +4,18 @@ import argparse
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import requests
 
-from utils.env import load_env_file
-from utils.logging_setup import setup_logging
-from utils.selector_remote import login_before_download
+from src.utils.env import load_env_file
+from src.utils.logging_setup import setup_logging
+from src.core.selector_remote import login_before_download
 
 
 DEFAULT_PUT_ENDPOINT = (

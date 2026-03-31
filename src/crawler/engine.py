@@ -10,31 +10,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
 
-from utils import (
-    build_port_queue,
-    create_logged_in_driver,
-    extract_element,
-    guard_fragile_locators,
-    load_config,
-    load_env_file,
-    normalize_elements_config,
-    read_pages,
-    resolve_max_workers,
-    resolve_profile_dirs,
-    resolve_selector_payload,
-    select_working_proxy,
-    setup_logging,
-    split_pages_for_workers,
-    str_to_bool,
-    terminate_chrome_process,
-    validate_selector_payload,
-    wait_for_page_ready,
-    wait_for_seconds,
-)
+from src.utils.ports import build_port_queue
+from src.core.driver_factory import create_logged_in_driver, terminate_chrome_process
+from src.core.selectors import extract_element, guard_fragile_locators, normalize_elements_config, validate_selector_payload
+from src.core.config_parser import load_config
+from src.utils.env import load_env_file, str_to_bool
+from src.utils.pages import read_pages, resolve_max_workers, split_pages_for_workers
+from src.utils.profiles import resolve_profile_dirs
+from src.core.selector_remote import resolve_selector_payload
+from src.utils.proxies import select_working_proxy
+from src.utils.logging_setup import setup_logging
+from src.utils.waits import wait_for_page_ready, wait_for_seconds
 
 
-DEFAULT_CONFIG_PATH = "config.json"
-DEFAULT_PAGES_FILE = "pages.txt"
+DEFAULT_CONFIG_PATH = "configs/config.json"
+DEFAULT_PAGES_FILE = "data/pages.txt"
 logger = logging.getLogger(__name__)
 
 '''
@@ -251,7 +241,7 @@ def main() -> None:
     env = load_env_file(".env")
     cookies_raw = env.get("COOKIES", "")
     user_agent = env.get("USER_AGENT", "")
-    user_agents_file = env.get("USER_AGENTS_FILE", "user_agents.txt").strip() or "user_agents.txt"
+    user_agents_file = env.get("USER_AGENTS_FILE", "data/user_agents.txt").strip() or "data/user_agents.txt"
     user_agents: List[str] = []
     if os.path.exists(user_agents_file):
         with open(user_agents_file, "r", encoding="utf-8") as file:
@@ -274,7 +264,7 @@ def main() -> None:
     )
     fb_home_url = env.get("FB_HOME_URL", "").strip() or None
     fb_locale_url = env.get("FB_LOCALE_URL", "").strip() or None
-    proxies_file = env.get("PROXIES_FILE", "proxies.txt").strip() or "proxies.txt"
+    proxies_file = env.get("PROXIES_FILE", "data/proxies.txt").strip() or "data/proxies.txt"
     proxy = select_working_proxy(env.get("PROXY"), proxies_file)
 
     login_method = (
@@ -295,7 +285,7 @@ def main() -> None:
     wait_between_pages = int(crawl_cfg.get("wait_between_pages", 0))
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
-    output_file = crawl_cfg.get("output_file", "crawl_results.json")
+    output_file = crawl_cfg.get("output_file", "data/crawl_results.json")
     default_wait_cfg: Dict[str, Any] | None = None
     selector_payload = None
     selector_source = "none"

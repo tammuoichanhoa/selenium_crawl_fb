@@ -19,10 +19,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 FACEBOOK_URL = "https://www.facebook.com/"
 DEFAULT_PROFILE_PATH = "chrome_profiles/facebook"
 DEFAULT_PROFILE_NAME = "Default"
-DEFAULT_COOKIE_FILE = "cookies.txt"
-DEFAULT_USER_AGENT_FILE = "user_agents.txt"
-DEFAULT_PROXY_FILE = "proxies.txt"
-LOG_FILE = "login_test.log"
+DEFAULT_COOKIE_FILE = "data/cookies.txt"
+DEFAULT_USER_AGENT_FILE = "data/user_agents.txt"
+DEFAULT_PROXY_FILE = "data/proxies.txt"
+LOG_FILE = "logs/login_test.log"
 
 
 logging.basicConfig(

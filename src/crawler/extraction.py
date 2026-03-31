@@ -14,7 +14,7 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from test_login import (
+from tests.test_login import (
     DEFAULT_COOKIE_FILE,
     DEFAULT_PROFILE_NAME,
     DEFAULT_PROFILE_PATH,
@@ -29,9 +29,9 @@ from test_login import (
 )
 
 
-DEFAULT_CONFIG_FILE = "config.yml"
-DEFAULT_PAGES_FILE = "pages.txt"
-DEFAULT_OUTPUT_FILE = "output/pages_data.json"
+DEFAULT_CONFIG_FILE = "configs/config.yml"
+DEFAULT_PAGES_FILE = "data/pages.txt"
+DEFAULT_OUTPUT_FILE = "data/pages_data.json"
 DEFAULT_FIELD_TIMEOUT = 15
 DEFAULT_PAGE_WAIT_SECONDS = 2.0
 DRIVER_VALUE_ATTRIBUTES = {"driver_title", "current_url", "page_source"}
