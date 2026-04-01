@@ -226,7 +226,7 @@ def crawl_pages_batch(
                 profile_info_path = database_path / "profile_info.json"
 
                 install_early_hook(driver, keep_last=350)
-                # scrape_full_profile_info(driver, url, profile_info_path)
+                scrape_full_profile_info(driver, url, profile_info_path)
 
                 page_data = crawl_page(
                     driver,
