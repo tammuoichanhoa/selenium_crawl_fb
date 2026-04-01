@@ -9,13 +9,16 @@ from pathlib import Path
 CURSOR_KEYS = {"end_cursor", "endCursor", "after", "afterCursor", "feedAfterCursor", "cursor"}
 
 POST_URL_RE = re.compile(
-    r"""https?://(?:web\.)?facebook\.com/
+    r"""https?://(?:[a-zA-Z0-9\-\.]+\.)?(?:facebook\.com|fb\.watch|fb\.me|fb\.com)/
         (?:
-            groups/[^/]+/(?:permalink|posts)/\d+
+            groups/[^/]+/(?:permalink|posts|videos)/\d+
           | [A-Za-z0-9.\-]+/posts/\d+
+          | [A-Za-z0-9.\-]+/videos(?:/[^/]+)?/\d+
+          | [A-Za-z0-9.\-]+(?:/photos/a\.\d+\.\d+)?/photos/.*?\d+
           | [A-Za-z0-9.\-]+/reel/\d+
-          | photo(?:\.php)?\?(?:.*(?:fbid|story_fbid|video_id)=\d+)
+          | photo(?:\.php)?\?(?:.*(?:fbid|story_fbid|video_id|v)=\d+)
           | .*?/pfbid[A-Za-z0-9]+
+          | .*?
         )
     """,
     re.I | re.X,

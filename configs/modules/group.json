@@ -1,0 +1,131 @@
+{
+  "site": "facebook",
+  "module": "group",
+  "page": "about",
+  "environment": "prod",
+  "version": "1.1.0",
+  "updated_at": "2026-03-28T00:00:00Z",
+  "updated_by": "crawler-team",
+  "defaults": {
+    "wait": {
+      "state": "presence",
+      "timeout_ms": 15000
+    }
+  },
+  "elements": {
+    "group.name": {
+      "primary": {
+        "type": "xpath",
+        "value": "//h1",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "h1 span",
+          "priority": 5
+        }
+      ],
+      "wait": {
+        "state": "visible",
+        "timeout_ms": 15000
+      },
+      "attribute": "text"
+    },
+    "group.cover": {
+      "primary": {
+        "type": "xpath",
+        "value": "//img[contains(@src,'fbcdn.net') and contains(@alt,'cover')]",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//img[contains(@src,'fbcdn.net')]",
+          "priority": 4
+        }
+      ],
+      "wait": {
+        "state": "visible",
+        "timeout_ms": 10000
+      },
+      "attribute": "src"
+    },
+    "group.privacy": {
+      "primary": {
+        "type": "xpath",
+        "value": "//span[contains(text(),'Public') or contains(text(),'Private')]",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "div[role='main'] span",
+          "priority": 4
+        }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 8000
+      },
+      "attribute": "text"
+    },
+    "group.members_count": {
+      "primary": {
+        "type": "xpath",
+        "value": "//span[contains(text(),'members')]",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//a[contains(@href,'members')]//span",
+          "priority": 5
+        }
+      ],
+      "wait": {
+        "state": "visible",
+        "timeout_ms": 10000
+      },
+      "attribute": "text"
+    },
+    "group.description": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[contains(@data-testid,'group_description')]",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//div[contains(@class,'x1yztbdb')]//span",
+          "priority": 4
+        }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 10000
+      },
+      "attribute": "text"
+    },
+    "group.recent_posts": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[@role='feed']//div[@data-ad-preview='message']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//div[@role='article']",
+          "priority": 5
+        }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 12000
+      },
+      "attribute": "text"
+    }
+  }
+}

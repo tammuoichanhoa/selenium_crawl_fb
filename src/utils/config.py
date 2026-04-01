@@ -6,7 +6,7 @@ import json  # parse config JSON
 import os  # file existence checks
 from typing import Any, Dict  # type hints
 
-DEFAULT_CONFIG_PATH = os.path.join("configs", "base.json")
+DEFAULT_CONFIG_PATH = os.path.join("configs", "config.json")
 
 
 def _read_json(path: str) -> Dict[str, Any]:
