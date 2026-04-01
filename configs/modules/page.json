@@ -1,0 +1,36 @@
+{
+  "site": "facebook",
+  "module": "page",
+  "page": "about",
+  "environment": "dev",
+  "version": "1.0.0",
+  "updated_at": "2026-03-07T00:00:00Z",
+  "updated_by": "crawler-team",
+  "defaults": {
+    "wait": {
+      "state": "presence",
+      "timeout_ms": 15000
+    }
+  },
+  "elements": {
+    "page.page_title": {
+      "primary": {
+        "type": "css",
+        "value": "h1",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//h1",
+          "priority": 5
+        }
+      ],
+      "wait": {
+        "state": "visible",
+        "timeout_ms": 15000
+      },
+      "attribute": "text"
+    }
+  }
+}
