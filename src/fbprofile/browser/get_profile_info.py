@@ -363,9 +363,9 @@ def get_profile_friends(driver, target_url, timeout: int = 5) -> list:
 # ==========================================
 # MAIN ORCHESTRATOR
 # ==========================================
-def scrape_full_profile_info(driver, target_url: str, output_path: Path):
+def scrape_full_profile_info(driver, target_url: str, output_path: Path = None) -> dict:
     """
-    Hàm chính điều phối việc lấy TOÀN BỘ thông tin profile và lưu file.
+    Hàm chính điều phối việc lấy TOÀN BỘ thông tin profile và trả về dict, lưu file nếu output_path được cung cấp.
     """
     logger.info(f"--- BẮT ĐẦU QUÉT INFO PROFILE (FULL): {target_url} ---")
     
@@ -408,13 +408,16 @@ def scrape_full_profile_info(driver, target_url: str, output_path: Path):
     except Exception as e:
         logger.error(f"[PROFILE] ❌ Lỗi nghiêm trọng khi quét profile: {e}")
     finally:
-        # Quan trọng: Dù thành công hay thất bại, lưu file lại
-        try:
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(full_data, f, ensure_ascii=False, indent=4)
-            logger.info(f"[PROFILE] 💾 Đã lưu FULL info vào: {output_path}")
-        except Exception as save_err:
-            logger.error(f"[PROFILE] Không thể lưu file: {save_err}")
+        # Quan trọng: Dù thành công hay thất bại, lưu file lại nếu có output_path
+        if output_path:
+            try:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(full_data, f, ensure_ascii=False, indent=4)
+                logger.info(f"[PROFILE] 💾 Đã lưu FULL info vào: {output_path}")
+            except Exception as save_err:
+                logger.error(f"[PROFILE] Không thể lưu file: {save_err}")
+        
+        return full_data
 
 def get_profile_high_res_pictures(driver, target_url, timeout=5, max_photos=None):
     wait = WebDriverWait(driver, timeout)

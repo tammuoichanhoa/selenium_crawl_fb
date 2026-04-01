@@ -89,7 +89,7 @@ def _post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, An
 def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     items = payload.get("items")
     if not isinstance(items, list) or not items:
-        raise ValueError("Dequeue response has no items to crawl.")
+        return []
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -583,19 +583,38 @@ def main() -> int:
         default=DEFAULT_EVENTS_URL,
         help="Events endpoint URL to post completion payload.",
     )
+    parser.add_argument(
+        "--test-uid",
+        dest="test_uid",
+        help="Cung cấp UID tĩnh để crawl test trực tiếp mà không cần chờ API.",
+    )
     args = parser.parse_args()
 
-    if not args.api_key:
-        logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
-        return 2
+    if args.test_uid:
+        logger.info("[TEST MODE] Bỏ qua API Queue, dùng UID test tĩnh: %s", args.test_uid)
+        items = [{
+            "task_id": "test_id_999", 
+            "uid": args.test_uid, 
+            "social_type": "facebook", 
+            "crawl_types": ["page"]
+        }]
+    else:
+        if not args.api_key:
+            logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
+            return 2
 
-    result = run_curl(args.api_key)
-    if result.returncode != 0:
-        logger.error("Dequeue request failed: %s", result.stderr.strip())
-        return result.returncode
+        result = run_curl(args.api_key)
+        if result.returncode != 0:
+            logger.error("Dequeue request failed: %s", result.stderr.strip())
+            return result.returncode
 
-    payload = _parse_dequeue_payload(result.stdout or "")
-    items = _extract_items(payload)
+        payload = _parse_dequeue_payload(result.stdout or "")
+        items = _extract_items(payload)
+
+    if not items:
+        logger.info("Hàng đợi của hệ thống (Queue) hiện đang trống hoặc không có tasks nào. Thoát an toàn.")
+        return 0
+
     env = load_env_file(".env")
     #@anhtb temp cookies for test
     account_cookies_file = env.get("ACCOUNT_COOKIES_FILE")
