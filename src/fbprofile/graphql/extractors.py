@@ -426,7 +426,7 @@ def _looks_like_group_post(n: dict) -> bool:
     if not _is_story_node(n): return False
     url = n.get("wwwURL") or n.get("url") or ""
     pid = n.get("id") or ""
-    if POST_URL_RE.match(url): return True
+    if POST_URL_RE.search(url): return True
     if (isinstance(pid, str) and pid.startswith("Uzpf")) or n.get("post_id"): return True
     return False
 
