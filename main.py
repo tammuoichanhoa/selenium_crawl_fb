@@ -75,7 +75,7 @@ def _post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, An
         "-d",
         json.dumps(payload, ensure_ascii=False),
     ]
-    response = subprocess.run(cmd, capture_output=True, text=True)
+    response = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if response.returncode != 0:
         logger.error(
             "[event] Failed to post task_id=%s: %s",
@@ -589,6 +589,10 @@ def main() -> int:
         help="Cung cấp UID tĩnh để crawl test trực tiếp mà không cần chờ API.",
     )
     args = parser.parse_args()
+    env = load_env_file(".env")
+    
+    if not args.api_key:
+        args.api_key = env.get("API_KEY")
 
     if args.test_uid:
         logger.info("[TEST MODE] Bỏ qua API Queue, dùng UID test tĩnh: %s", args.test_uid)
@@ -614,8 +618,6 @@ def main() -> int:
     if not items:
         logger.info("Hàng đợi của hệ thống (Queue) hiện đang trống hoặc không có tasks nào. Thoát an toàn.")
         return 0
-
-    env = load_env_file(".env")
     #@anhtb temp cookies for test
     account_cookies_file = env.get("ACCOUNT_COOKIES_FILE")
     account_cookies = _load_account_cookies(account_cookies_file)

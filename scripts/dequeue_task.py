@@ -22,7 +22,7 @@ def run_curl(api_key: str) -> subprocess.CompletedProcess:
         "-H",
         f"Authorization: Bearer {api_key}",
     ]
-    return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
 
 def main() -> int:
     parser = argparse.ArgumentParser(
