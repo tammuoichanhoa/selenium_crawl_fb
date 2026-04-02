@@ -66,6 +66,12 @@ def process_single_gql_rec(
     fresh: List[Dict[str, Any]] = []
     for p in page_posts:
         pk = _best_primary_key(p)
+        if not pk:
+            import hashlib
+            raw = str(p.get("created_time", "")) + str(p.get("content", "")) + str(p.get("link", ""))
+            if len(raw) > 5:
+                pk = "hash_" + hashlib.md5(raw.encode("utf-8")).hexdigest()
+        
         if pk and (pk not in seen_ids) and (pk not in written_this_round):
             fresh.append(p)
             written_this_round.add(pk)
