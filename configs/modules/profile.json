@@ -401,6 +401,162 @@
         "timeout_ms": 10000
       },
       "attribute": "src"
+    },
+    "profile.featured.collection_link": {
+      "primary": {
+        "type": "xpath",
+        "value": "//a[contains(@href, 'source=profile_highlight')]",
+        "priority": 6
+      },
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 8000
+      },
+      "attribute": "href",
+      "multiple": true
+    },
+    "profile.featured.title_clamp": {
+      "primary": {
+        "type": "xpath",
+        "value": ".//span[contains(@style, '-webkit-line-clamp')]",
+        "priority": 5
+      },
+      "attribute": "text"
+    },
+    "profile.featured.view_button": {
+      "primary": {
+        "type": "xpath",
+        "value": "//span[contains(text(), 'Nhấp để xem tin')]",
+        "priority": 5
+      },
+      "wait": {
+        "state": "clickable",
+        "timeout_ms": 5000
+      },
+      "attribute": "text"
+    },
+    "profile.featured.next_button": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[@aria-label='Thẻ tiếp theo'][@role='button']",
+        "priority": 5
+      },
+      "wait": {
+        "state": "clickable",
+        "timeout_ms": 4000
+      },
+      "attribute": "text"
+    },
+    "profile.featured.story_image": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[contains(@data-id, 'story-viewer')]//img",
+        "priority": 5
+      },
+      "attribute": "src"
+    },
+    "profile.featured.story_video": {
+      "primary": {
+        "type": "tagName",
+        "value": "video",
+        "priority": 5
+      },
+      "attribute": "src"
+    },
+    "profile.about.tab": {
+      "primary": {
+        "type": "xpath",
+        "value": "//a[@role='tab']//span",
+        "priority": 4
+      },
+      "attribute": "text"
+    },
+    "profile.about.details.section": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[@class='x1iyjqo2']//div[@class='xieb3on x1gslohp']",
+        "priority": 5
+      },
+      "multiple": true,
+      "attribute": "text"
+    },
+    "profile.about.rows_primary": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[contains(@class, 'x13faqbe')]",
+        "priority": 5
+      },
+      "multiple": true,
+      "attribute": "text"
+    },
+    "profile.about.rows_fallback": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[@class='x1iyjqo2']//div[@class='x1gslohp']",
+        "priority": 4
+      },
+      "multiple": true,
+      "attribute": "text"
+    },
+    "profile.photos.thumb": {
+      "primary": {
+        "type": "xpath",
+        "value": "//a[contains(@href, 'photo.php')]//img",
+        "priority": 5
+      },
+      "multiple": true,
+      "attribute": "src"
+    },
+    "profile.photos.link": {
+      "primary": {
+        "type": "xpath",
+        "value": "//a[contains(@href,'photo.php')]",
+        "priority": 5
+      },
+      "multiple": true,
+      "attribute": "href"
+    },
+    "profile.photos.highres_img": {
+      "primary": {
+        "type": "xpath",
+        "value": "//img[contains(@src,'fbcdn.net')]",
+        "priority": 4
+      },
+      "multiple": true,
+      "attribute": "src"
+    },
+    "profile.friends.card": {
+      "primary": {
+        "type": "xpath",
+        "value": "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]",
+        "priority": 5
+      },
+      "multiple": true,
+      "attribute": "text"
+    },
+    "profile.friends.link": {
+      "primary": {
+        "type": "xpath",
+        "value": ".//a[@role='link']",
+        "priority": 5
+      },
+      "attribute": "href"
+    },
+    "profile.friends.subtitle": {
+      "primary": {
+        "type": "xpath",
+        "value": ".//div[contains(@class, 'x1gslohp')]",
+        "priority": 4
+      },
+      "attribute": "text"
+    },
+    "profile.friends.avatar": {
+      "primary": {
+        "type": "xpath",
+        "value": "./preceding-sibling::div//img",
+        "priority": 4
+      },
+      "attribute": "src"
     }
   }
 }

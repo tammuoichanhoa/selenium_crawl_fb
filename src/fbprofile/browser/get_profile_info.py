@@ -1,6 +1,9 @@
 import time
 import json
+import os
+from functools import lru_cache
 from pathlib import Path
+from typing import Any, Dict, Optional
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -8,6 +11,145 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 
 # Import logger từ hệ thống log hiện tại
 from logs.loging_config import logger
+from src.utils import (
+    DEFAULT_CONFIG_PATH,
+    build_locator_chain,
+    extract_element,
+    load_config,
+    normalize_elements_config,
+    resolve_locator,
+    validate_selector_payload,
+)
+
+PROFILE_SELECTOR_CONFIG_PATH = os.path.join("configs", "base.json")
+
+
+def _resolve_profile_module(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    selectors = config.get("selectors")
+    if not isinstance(selectors, dict):
+        return None
+    modules = selectors.get("modules")
+    if not isinstance(modules, dict):
+        return None
+    module = modules.get("profile")
+    if not isinstance(module, dict):
+        return None
+    return module
+
+
+@lru_cache(maxsize=2)
+def _load_profile_selector_context(
+    config_path: str = PROFILE_SELECTOR_CONFIG_PATH,
+) -> Dict[str, Any]:
+    last_error: Optional[Exception] = None
+    for path in (config_path, DEFAULT_CONFIG_PATH):
+        try:
+            config = load_config(path)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        module = _resolve_profile_module(config)
+        if not module:
+            last_error = ValueError(f"Profile selector module not found in {path}")
+            continue
+
+        validate_selector_payload(module)
+        elements_cfg = normalize_elements_config(module.get("elements"))
+        index = {cfg.get("name"): cfg for cfg in elements_cfg if cfg.get("name")}
+
+        default_wait_cfg = module.get("defaults", {}).get("wait")
+        if not isinstance(default_wait_cfg, dict):
+            default_wait_cfg = None
+
+        crawl_cfg = config.get("crawl", {})
+        timeout = crawl_cfg.get("element_timeout", 10)
+        try:
+            timeout = int(timeout)
+        except (TypeError, ValueError):
+            timeout = 10
+
+        debug_cfg = None
+        selectors_cfg = config.get("selectors")
+        if isinstance(selectors_cfg, dict):
+            debug_cfg = selectors_cfg.get("debug")
+            if not isinstance(debug_cfg, dict):
+                debug_cfg = None
+
+        return {
+            "elements": index,
+            "default_wait": default_wait_cfg,
+            "timeout": timeout,
+            "debug": debug_cfg,
+        }
+
+    if last_error:
+        logger.warning("[PROFILE] Không thể tải selector config: %s", last_error)
+    return {}
+
+
+def _extract_profile_field(driver, ctx: Dict[str, Any], name: str) -> Optional[str]:
+    elements = ctx.get("elements") or {}
+    element_cfg = elements.get(name)
+    if not isinstance(element_cfg, dict):
+        return None
+    try:
+        return extract_element(
+            driver,
+            element_cfg,
+            ctx.get("timeout", 10),
+            ctx.get("default_wait"),
+            ctx.get("debug"),
+        )
+    except TimeoutException:
+        return None
+    except Exception as exc:
+        logger.warning("[PROFILE] Lỗi selector '%s': %s", name, exc)
+        return None
+
+
+def _find_profile_elements(driver, ctx: Dict[str, Any], name: str):
+    elements = ctx.get("elements") or {}
+    element_cfg = elements.get(name)
+    if not isinstance(element_cfg, dict):
+        return []
+    for locator_cfg in build_locator_chain(element_cfg):
+        try:
+            by, selector = resolve_locator(locator_cfg)
+            found = driver.find_elements(by, selector)
+            if found:
+                return found
+        except Exception:
+            continue
+    return []
+
+
+def _find_profile_element(driver, ctx: Dict[str, Any], name: str):
+    elements = ctx.get("elements") or {}
+    element_cfg = elements.get(name)
+    if not isinstance(element_cfg, dict):
+        return None
+    for locator_cfg in build_locator_chain(element_cfg):
+        try:
+            by, selector = resolve_locator(locator_cfg)
+            return driver.find_element(by, selector)
+        except Exception:
+            continue
+    return None
+
+
+def _find_profile_child_element(parent, ctx: Dict[str, Any], name: str):
+    elements = ctx.get("elements") or {}
+    element_cfg = elements.get(name)
+    if not isinstance(element_cfg, dict):
+        return None
+    for locator_cfg in build_locator_chain(element_cfg):
+        try:
+            by, selector = resolve_locator(locator_cfg)
+            return parent.find_element(by, selector)
+        except Exception:
+            continue
+    return None
 
 # ==========================================
 # 1. BASIC INFO (Tên, Avatar, Follower)
@@ -26,68 +168,84 @@ def get_name_followers_following_avatar(driver):
     }
     
     try:
+        selector_ctx = _load_profile_selector_context()
+
+        if selector_ctx.get("elements"):
+            info["name"] = _extract_profile_field(driver, selector_ctx, "profile.name")
+            info["avatar_url"] = _extract_profile_field(driver, selector_ctx, "profile.avatar")
+            info["cover_photo"] = _extract_profile_field(driver, selector_ctx, "profile.cover")
+            info["friends"] = _extract_profile_field(driver, selector_ctx, "profile.friends_count") or info["friends"]
+            info["followers"] = _extract_profile_field(driver, selector_ctx, "profile.followers_count") or info["followers"]
+            info["following"] = _extract_profile_field(driver, selector_ctx, "profile.following_count") or info["following"]
+
         wait = WebDriverWait(driver, 10)
         
         # 1. Tên (Giữ nguyên)
-        try:
-            name_element = wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
-            info["name"] = name_element.text.strip()
-        except:
-            logger.warning("[PROFILE] Không tìm thấy tên user.")
+        if not info["name"]:
+            try:
+                name_element = wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
+                info["name"] = name_element.text.strip()
+            except:
+                logger.warning("[PROFILE] Không tìm thấy tên user.")
 
         # 2. Avatar (CẬP NHẬT MỚI DỰA TRÊN HTML BẠN GỬI)
-        try:
-            # Tìm thẻ <image> nằm trong <svg role="img">
-            # Thuộc tính preserveAspectRatio="xMidYMid slice" rất đặc trưng cho avatar FB
-            avatar_xpath = "//*[name()='svg'][@role='img']//*[name()='image']"
-            
-            # Lấy tất cả các element khớp (thường avatar là cái to nhất hoặc đầu tiên)
-            imgs = driver.find_elements(By.XPATH, avatar_xpath)
-            
-            for img in imgs:
-                # Ưu tiên lấy xlink:href
-                src = img.get_attribute("xlink:href")
-                if not src:
-                    src = img.get_attribute("href")
+        if not info["avatar_url"]:
+            try:
+                # Tìm thẻ <image> nằm trong <svg role="img">
+                # Thuộc tính preserveAspectRatio="xMidYMid slice" rất đặc trưng cho avatar FB
+                avatar_xpath = "//*[name()='svg'][@role='img']//*[name()='image']"
                 
-                # Link avatar thường chứa 'fbcdn' và không phải là icon nhỏ (thường icon nhỏ là .png hoặc svg base64)
-                if src and "fbcdn" in src:
-                    info["avatar_url"] = src
-                    break # Lấy được cái đầu tiên hợp lệ thì dừng
-        except Exception as e:
-            logger.warning(f"[PROFILE] Lỗi lấy Avatar: {e}")
+                # Lấy tất cả các element khớp (thường avatar là cái to nhất hoặc đầu tiên)
+                imgs = driver.find_elements(By.XPATH, avatar_xpath)
+                
+                for img in imgs:
+                    # Ưu tiên lấy xlink:href
+                    src = img.get_attribute("xlink:href")
+                    if not src:
+                        src = img.get_attribute("href")
+                    
+                    # Link avatar thường chứa 'fbcdn' và không phải là icon nhỏ (thường icon nhỏ là .png hoặc svg base64)
+                    if src and "fbcdn" in src:
+                        info["avatar_url"] = src
+                        break # Lấy được cái đầu tiên hợp lệ thì dừng
+            except Exception as e:
+                logger.warning(f"[PROFILE] Lỗi lấy Avatar: {e}")
 
         # 3. Số lượng Bạn bè (CẬP NHẬT MỚI)
-        try:
-            # Tìm thẻ <a> có href chứa chữ 'friends'
-            # HTML: <a href=".../friends/"><strong>324</strong> người bạn</a>
-            friend_xpath = "//a[contains(@href, 'friends')]//strong"
-            friend_element = driver.find_element(By.XPATH, friend_xpath)
-            info["friends"] = friend_element.text.strip()
-        except:
-            # Fallback: Đôi khi nó hiện "xxx người theo dõi" ở chỗ bạn bè nếu không công khai bạn bè
-            pass
+        if info["friends"] == "0":
+            try:
+                # Tìm thẻ <a> có href chứa chữ 'friends'
+                # HTML: <a href=".../friends/"><strong>324</strong> người bạn</a>
+                friend_xpath = "//a[contains(@href, 'friends')]//strong"
+                friend_element = driver.find_element(By.XPATH, friend_xpath)
+                info["friends"] = friend_element.text.strip()
+            except:
+                # Fallback: Đôi khi nó hiện "xxx người theo dõi" ở chỗ bạn bè nếu không công khai bạn bè
+                pass
 
         # 4. Followers (Người theo dõi - Giữ nguyên logic cũ nhưng thêm try-except lỏng hơn)
-        try:
-            followers_element = driver.find_element(By.XPATH, "//a[contains(@href, 'followers')]//strong")
-            info["followers"] = followers_element.text.strip()
-        except:
-            pass
+        if info["followers"] == "0":
+            try:
+                followers_element = driver.find_element(By.XPATH, "//a[contains(@href, 'followers')]//strong")
+                info["followers"] = followers_element.text.strip()
+            except:
+                pass
 
         # 5. Following (Đang theo dõi - Giữ nguyên)
-        try:
-            following_element = driver.find_element(By.XPATH, "//a[contains(@href, 'following')]//strong")
-            info["following"] = following_element.text.strip()
-        except:
-            pass
+        if info["following"] == "0":
+            try:
+                following_element = driver.find_element(By.XPATH, "//a[contains(@href, 'following')]//strong")
+                info["following"] = following_element.text.strip()
+            except:
+                pass
 
         # 6. Ảnh bìa (Giữ nguyên)
-        try:
-            cover_element = driver.find_element(By.XPATH, "//img[@data-imgperflogname='profileCoverPhoto']")
-            info["cover_photo"] = cover_element.get_attribute("src")
-        except:
-            pass
+        if not info["cover_photo"]:
+            try:
+                cover_element = driver.find_element(By.XPATH, "//img[@data-imgperflogname='profileCoverPhoto']")
+                info["cover_photo"] = cover_element.get_attribute("src")
+            except:
+                pass
 
     except Exception as e:
         logger.error(f"[PROFILE] Lỗi lấy Basic Info: {e}")
@@ -101,6 +259,7 @@ def get_profile_featured_news(driver, target_url, timeout: int = 5):
     """Lấy dữ liệu từ mục 'Đáng chú ý' (Highlights)."""
     featured_data = []
     wait = WebDriverWait(driver, timeout)
+    selector_ctx = _load_profile_selector_context()
 
     try:
         if target_url not in driver.current_url:
@@ -111,15 +270,21 @@ def get_profile_featured_news(driver, target_url, timeout: int = 5):
         
         collection_links = []
         try:
-            elements = wait.until(EC.presence_of_all_elements_located(
-                (By.XPATH, "//a[contains(@href, 'source=profile_highlight')]")
-            ))
+            elements = _find_profile_elements(driver, selector_ctx, "profile.featured.collection_link")
+            if not elements:
+                elements = wait.until(EC.presence_of_all_elements_located(
+                    (By.XPATH, "//a[contains(@href, 'source=profile_highlight')]")
+                ))
             for el in elements:
                 url = el.get_attribute("href")
                 title = el.text.strip()
                 if not title:
                     try:
-                        title = el.find_element(By.XPATH, ".//span[contains(@style, '-webkit-line-clamp')]").text
+                        title_el = _find_profile_child_element(el, selector_ctx, "profile.featured.title_clamp")
+                        if title_el:
+                            title = title_el.text
+                        else:
+                            title = el.find_element(By.XPATH, ".//span[contains(@style, '-webkit-line-clamp')]").text
                     except:
                         title = "Không tên"
                 
@@ -138,9 +303,11 @@ def get_profile_featured_news(driver, target_url, timeout: int = 5):
 
             # Xử lý nút "Nhấp để xem tin"
             try:
-                view_btn_xpath = "//span[contains(text(), 'Nhấp để xem tin')]"
                 overlay_wait = WebDriverWait(driver, 5)
-                btn = overlay_wait.until(EC.element_to_be_clickable((By.XPATH, view_btn_xpath)))
+                btn = _find_profile_element(driver, selector_ctx, "profile.featured.view_button")
+                if btn is None:
+                    view_btn_xpath = "//span[contains(text(), 'Nhấp để xem tin')]"
+                    btn = overlay_wait.until(EC.element_to_be_clickable((By.XPATH, view_btn_xpath)))
                 driver.execute_script("arguments[0].click();", btn)
                 time.sleep(3)
             except TimeoutException:
@@ -157,12 +324,16 @@ def get_profile_featured_news(driver, target_url, timeout: int = 5):
                     media_type = "unknown"
 
                     try:
-                        video_element = driver.find_element(By.TAG_NAME, "video")
+                        video_element = _find_profile_element(driver, selector_ctx, "profile.featured.story_video")
+                        if video_element is None:
+                            video_element = driver.find_element(By.TAG_NAME, "video")
                         media_src = video_element.get_attribute("src")
                         media_type = "video"
                     except:
                         try:
-                            img_element = driver.find_element(By.XPATH, "//div[contains(@data-id, 'story-viewer')]//img")
+                            img_element = _find_profile_element(driver, selector_ctx, "profile.featured.story_image")
+                            if img_element is None:
+                                img_element = driver.find_element(By.XPATH, "//div[contains(@data-id, 'story-viewer')]//img")
                             media_src = img_element.get_attribute("src")
                             media_type = "image"
                         except:
@@ -173,9 +344,11 @@ def get_profile_featured_news(driver, target_url, timeout: int = 5):
                         collection_media.append({"type": media_type, "src": media_src})
 
                     # Click Next
-                    next_xpath = "//div[@aria-label='Thẻ tiếp theo'][@role='button']"
                     try:
-                        next_btn = driver.find_element(By.XPATH, next_xpath)
+                        next_btn = _find_profile_element(driver, selector_ctx, "profile.featured.next_button")
+                        if next_btn is None:
+                            next_xpath = "//div[@aria-label='Thẻ tiếp theo'][@role='button']"
+                            next_btn = driver.find_element(By.XPATH, next_xpath)
                         driver.execute_script("arguments[0].click();", next_btn)
                         time.sleep(2.5)
                     except:
@@ -209,6 +382,7 @@ def get_profile_introduces(driver, target_url, timeout: int = 2) -> dict:
     
     data = {}
     wait = WebDriverWait(driver, timeout)
+    selector_ctx = _load_profile_selector_context()
 
     tabs_mapping = {
         "overview": ["Tổng quan", "Overview"],
@@ -239,10 +413,13 @@ def get_profile_introduces(driver, target_url, timeout: int = 2) -> dict:
 
             # Xử lý riêng cho tab "details"
             if key == "details":
-                sections = driver.find_elements(By.XPATH, "//div[@class='x1iyjqo2']//div[@class='xieb3on x1gslohp']")
+                sections = _find_profile_elements(driver, selector_ctx, "profile.about.details.section")
+                if not sections:
+                    sections = driver.find_elements(By.XPATH, "//div[@class='x1iyjqo2']//div[@class='xieb3on x1gslohp']")
                 for sec in sections:
                     try:
-                        header = sec.find_element(By.TAG_NAME, "h2").text.strip()
+                        header_el = sec.find_element(By.TAG_NAME, "h2")
+                        header = header_el.text.strip()
                         content_div = sec.find_element(By.XPATH, "./following-sibling::div[contains(@class, 'xat24cr')]")
                         content_text = content_div.text.strip()
                         if "Không có" not in content_text:
@@ -250,9 +427,13 @@ def get_profile_introduces(driver, target_url, timeout: int = 2) -> dict:
                     except:
                         continue
             else:
-                rows = driver.find_elements(By.XPATH, "//div[contains(@class, 'x13faqbe')]")
+                rows = _find_profile_elements(driver, selector_ctx, "profile.about.rows_primary")
                 if not rows:
-                    rows = driver.find_elements(By.XPATH, "//div[@class='x1iyjqo2']//div[@class='x1gslohp']")
+                    rows = driver.find_elements(By.XPATH, "//div[contains(@class, 'x13faqbe')]")
+                if not rows:
+                    rows = _find_profile_elements(driver, selector_ctx, "profile.about.rows_fallback")
+                    if not rows:
+                        rows = driver.find_elements(By.XPATH, "//div[@class='x1iyjqo2']//div[@class='x1gslohp']")
                 
                 for row in rows:
                     text_content = row.text.strip()
@@ -273,6 +454,7 @@ def get_profile_pictures(driver, target_url, timeout: int = 20) -> list:
     """Lấy danh sách Ảnh."""
     image_urls = []
     wait = WebDriverWait(driver, timeout)
+    selector_ctx = _load_profile_selector_context()
 
     try:
         target_photos = f"{target_url}/photos" if "profile.php" not in target_url else f"{target_url}&sk=photos"
@@ -282,12 +464,19 @@ def get_profile_pictures(driver, target_url, timeout: int = 20) -> list:
         logger.info("[PROFILE] Đang quét danh sách ảnh...")
         xpath_images = "//a[contains(@href, 'photo.php')]//img"
         try:
-            wait.until(EC.presence_of_element_located((By.XPATH, xpath_images)))
+            try:
+                element = _find_profile_element(driver, selector_ctx, "profile.photos.thumb")
+                if element is None:
+                    wait.until(EC.presence_of_element_located((By.XPATH, xpath_images)))
+            except Exception:
+                wait.until(EC.presence_of_element_located((By.XPATH, xpath_images)))
             # Cuộn một chút để load thêm ảnh
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
             time.sleep(2)
             
-            img_elements = driver.find_elements(By.XPATH, xpath_images)
+            img_elements = _find_profile_elements(driver, selector_ctx, "profile.photos.thumb")
+            if not img_elements:
+                img_elements = driver.find_elements(By.XPATH, xpath_images)
             for img in img_elements:
                 src = img.get_attribute("src")
                 if src and "fbcdn.net" in src:
@@ -307,6 +496,7 @@ def get_profile_friends(driver, target_url, timeout: int = 5) -> list:
     """Lấy danh sách Bạn bè (có cuộn trang)."""
     friends_list = []
     
+    selector_ctx = _load_profile_selector_context()
     try:
         target_friends = f"{target_url}/friends" if "profile.php" not in target_url else f"{target_url}&sk=friends"
             
@@ -326,7 +516,9 @@ def get_profile_friends(driver, target_url, timeout: int = 5) -> list:
             last_height = new_height
 
         logger.info("[PROFILE] Đang trích xuất dữ liệu bạn bè...")
-        info_divs = driver.find_elements(By.XPATH, "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]")
+        info_divs = _find_profile_elements(driver, selector_ctx, "profile.friends.card")
+        if not info_divs:
+            info_divs = driver.find_elements(By.XPATH, "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]")
 
         for info in info_divs:
             try:
@@ -334,20 +526,26 @@ def get_profile_friends(driver, target_url, timeout: int = 5) -> list:
                 
                 # Tên & Link
                 try:
-                    link_element = info.find_element(By.XPATH, ".//a[@role='link']")
+                    link_element = _find_profile_child_element(info, selector_ctx, "profile.friends.link")
+                    if link_element is None:
+                        link_element = info.find_element(By.XPATH, ".//a[@role='link']")
                     friend_data["name"] = link_element.text.strip()
                     friend_data["profile_url"] = link_element.get_attribute("href")
                 except: continue
 
                 # Subtitle
                 try:
-                    sub_el = info.find_element(By.XPATH, ".//div[contains(@class, 'x1gslohp')]")
+                    sub_el = _find_profile_child_element(info, selector_ctx, "profile.friends.subtitle")
+                    if sub_el is None:
+                        sub_el = info.find_element(By.XPATH, ".//div[contains(@class, 'x1gslohp')]")
                     friend_data["subtitle"] = sub_el.text.strip()
                 except: pass
 
                 # Avatar
                 try:
-                    avt_el = info.find_element(By.XPATH, "./preceding-sibling::div//img")
+                    avt_el = _find_profile_child_element(info, selector_ctx, "profile.friends.avatar")
+                    if avt_el is None:
+                        avt_el = info.find_element(By.XPATH, "./preceding-sibling::div//img")
                     friend_data["avatar_url"] = avt_el.get_attribute("src")
                 except: pass
 
@@ -453,7 +651,10 @@ def get_profile_high_res_pictures(driver, target_url, timeout=5, max_photos=None
 
     # 2. Lấy danh sách link photo.php
     photo_links = set()
-    photo_elements = driver.find_elements(By.XPATH, "//a[contains(@href,'photo.php')]")
+    selector_ctx = _load_profile_selector_context()
+    photo_elements = _find_profile_elements(driver, selector_ctx, "profile.photos.link")
+    if not photo_elements:
+        photo_elements = driver.find_elements(By.XPATH, "//a[contains(@href,'photo.php')]")
 
     for el in photo_elements:
         href = el.get_attribute("href")
@@ -496,8 +697,16 @@ def get_profile_high_res_pictures(driver, target_url, timeout=5, max_photos=None
                 driver.switch_to.window(window)
                 try:
                     fast_wait = WebDriverWait(driver, 2) 
-                    fast_wait.until(EC.presence_of_element_located((By.XPATH, "//img[contains(@src,'fbcdn.net')]")))
-                    imgs = driver.find_elements(By.XPATH, "//img[contains(@src,'fbcdn.net')]")
+                    try:
+                        element = _find_profile_element(driver, selector_ctx, "profile.photos.highres_img")
+                        if element is None:
+                            fast_wait.until(EC.presence_of_element_located((By.XPATH, "//img[contains(@src,'fbcdn.net')]")))
+                    except Exception:
+                        fast_wait.until(EC.presence_of_element_located((By.XPATH, "//img[contains(@src,'fbcdn.net')]")))
+
+                    imgs = _find_profile_elements(driver, selector_ctx, "profile.photos.highres_img")
+                    if not imgs:
+                        imgs = driver.find_elements(By.XPATH, "//img[contains(@src,'fbcdn.net')]")
 
                     max_img = None
                     max_area = 0
