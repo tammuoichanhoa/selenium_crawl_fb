@@ -10,6 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
 
+from selenium.webdriver.common.by import By
+
 from src.utils import (
     build_port_queue,
     create_logged_in_driver,
@@ -49,31 +51,70 @@ logger = logging.getLogger(__name__)
     Lỗi thì ghi None và log lỗi.
     Trả về dict dữ liệu, có key "url".
     '''
+def _has_add_friend_button(driver) -> bool:
+    xpaths = (
+        "//div[normalize-space(text())='Thêm bạn bè']",
+        "//span[normalize-space(text())='Thêm bạn bè']",
+        "//div[normalize-space(text())='Add Friend']",
+        "//span[normalize-space(text())='Add Friend']",
+    )
+    for xpath in xpaths:
+        try:
+            if driver.find_elements(By.XPATH, xpath):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def crawl_page(
     driver,
     url: str,
     elements_cfg: List[Dict[str, Any]],
+    elements_cfg_profile: List[Dict[str, Any]] | None,
+    elements_cfg_page: List[Dict[str, Any]] | None,
     wait_after_load: int,
     element_timeout: int,
     default_wait_cfg: Dict[str, Any] | None,
+    default_wait_cfg_profile: Dict[str, Any] | None,
+    default_wait_cfg_page: Dict[str, Any] | None,
     selector_debug_cfg: Dict[str, Any] | None,
+    selector_debug_cfg_profile: Dict[str, Any] | None,
+    selector_debug_cfg_page: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     logger.info("[crawl] Visiting %s", url)
     driver.get(url)
     wait_for_page_ready(driver, 20)
     wait_for_seconds(driver, wait_after_load)
 
-    
+    active_elements_cfg = elements_cfg
+    active_default_wait_cfg = default_wait_cfg
+    active_selector_debug_cfg = selector_debug_cfg
+    if elements_cfg_profile is not None and elements_cfg_page is not None:
+        is_profile = _has_add_friend_button(driver)
+        if is_profile:
+            active_elements_cfg = elements_cfg_profile
+            active_default_wait_cfg = default_wait_cfg_profile or default_wait_cfg
+            active_selector_debug_cfg = selector_debug_cfg_profile or selector_debug_cfg
+        else:
+            active_elements_cfg = elements_cfg_page
+            active_default_wait_cfg = default_wait_cfg_page or default_wait_cfg
+            active_selector_debug_cfg = selector_debug_cfg_page or selector_debug_cfg
+        logger.info(
+            "[crawl] Detected %s by add-friend button",
+            "profile" if is_profile else "page",
+        )
+
     data: Dict[str, Any] = {"url": url}
-    for element_cfg in elements_cfg:
+    for element_cfg in active_elements_cfg:
         name = element_cfg.get("name") or element_cfg.get("selector")
         try:
             value = extract_element(
                 driver,
                 element_cfg,
                 element_timeout,
-                default_wait_cfg,
-                selector_debug_cfg,
+                active_default_wait_cfg,
+                active_selector_debug_cfg,
             )
         except Exception as exc:
             logger.warning(
@@ -142,12 +183,18 @@ def crawl_pages_batch(
     fb_locale_url: str | None,
     port_queue: queue.Queue[int],
     elements_cfg: List[Dict[str, Any]],
+    elements_cfg_profile: List[Dict[str, Any]] | None,
+    elements_cfg_page: List[Dict[str, Any]] | None,
     wait_after_load: int,
     wait_between_pages: int,
     element_timeout: int,
     login_stagger_seconds: int,
     default_wait_cfg: Dict[str, Any] | None,
+    default_wait_cfg_profile: Dict[str, Any] | None,
+    default_wait_cfg_page: Dict[str, Any] | None,
     selector_debug_cfg: Dict[str, Any] | None,
+    selector_debug_cfg_profile: Dict[str, Any] | None,
+    selector_debug_cfg_page: Dict[str, Any] | None,
     profile_backup_name: str | None = None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
@@ -205,10 +252,16 @@ def crawl_pages_batch(
                     driver,
                     url,
                     elements_cfg,
+                    elements_cfg_profile,
+                    elements_cfg_page,
                     wait_after_load,
                     element_timeout,
                     default_wait_cfg,
+                    default_wait_cfg_profile,
+                    default_wait_cfg_page,
                     selector_debug_cfg,
+                    selector_debug_cfg_profile,
+                    selector_debug_cfg_page,
                 )
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
@@ -480,12 +533,18 @@ def main() -> None:
                 fb_locale_url=fb_locale_url,
                 port_queue=port_queue,
                 elements_cfg=elements_cfg,
+                elements_cfg_profile=None,
+                elements_cfg_page=None,
                 wait_after_load=wait_after_load,
                 wait_between_pages=wait_between_pages,
                 element_timeout=element_timeout,
                 login_stagger_seconds=login_stagger_seconds,
                 default_wait_cfg=default_wait_cfg,
+                default_wait_cfg_profile=None,
+                default_wait_cfg_page=None,
                 selector_debug_cfg=selector_debug_cfg,
+                selector_debug_cfg_profile=None,
+                selector_debug_cfg_page=None,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]

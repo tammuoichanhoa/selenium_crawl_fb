@@ -54,11 +54,12 @@
     },
     "profile.avatar": {
       "primary": {
-        "type": "xpath",
-        "value": "//*[name()='svg'][@role='img']//*[name()='image']",
+        "type": "css",
+        "value": ".x1jx94hy > .x1i10hfl",
         "priority": 6
-      },
+         },
       "fallbacks": [
+        
         {
           "type": "css",
           "value": "image[xlink\\:href]",
@@ -68,11 +69,6 @@
           "type": "xpath",
           "value": "//img[contains(@src,'fbcdn.net')]",
           "priority": 4
-        },
-        {
-          "type": "css",
-          "value": ".x1jx94hy > .x1i10hfl",
-          "priority": 2
         }
       ],
       "wait": {
@@ -82,16 +78,16 @@
       "attribute": "href"
     },
     "profile.cover": {
-      "primary": {
-        "type": "xpath",
-        "value": "//img[@data-imgperflogname='profileCoverPhoto']",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
+      "primary":{
           "type": "xpath",
           "value": "//*[@role='link' and @aria-label='Xem ảnh bài của trang cá nhân']",
           "priority": 5
+        },
+      "fallbacks": [
+        {
+        "type": "xpath",
+        "value": "//img[@data-imgperflogname='profileCoverPhoto']",
+        "priority": 6
         },
         {
           "type": "xpath",
@@ -102,11 +98,6 @@
           "type": "css",
           "value": "[aria-label=\"Xem ảnh bài của trang cá nhân\"]",
           "priority": 4
-        },
-        {
-          "type": "css",
-          "value": ".x9f619 > .x6ikm8r > .x1i10hfl",
-          "priority": 2
         },
         {
           "type": "xpath",
@@ -121,11 +112,12 @@
       "attribute": "src"
     },
     "profile.friends_count": {
-      "primary": {
-        "type": "xpath",
-        "value": "//a[contains(@href, 'friends')]//strong",
-        "priority": 6
-      },
+      "primary": 
+        {
+          "type": "xpath",
+          "value": "//*[contains(@class,'xyamay9')]//span/a",
+          "priority": 4
+        },
       "fallbacks": [
         {
           "type": "xpath",
@@ -133,8 +125,18 @@
           "priority": 5
         },
         {
+        "type": "xpath",
+        "value": "//a[contains(@href, 'friends')]//strong",
+        "priority": 6
+        },
+        {
+          "type": "xpath",
+          "value": "//*[contains(@class,'x1icxu4v')]//*[contains(@class,'xyamay9')]//span/a",
+          "priority": 5
+        },
+        {
           "type": "css",
-          "value": ".x193iq5w > .x1i10hfl",
+          "value": ".x1icxu4v .xyamay9 > span > a",
           "priority": 4
         }
       ],
@@ -145,12 +147,17 @@
       "attribute": "text"
     },
     "profile.followers_count": {
-      "primary": {
-        "type": "xpath",
-        "value": "//a[contains(@href, 'followers')]//strong",
+     "primary": {
+        "type": "css",
+        "value": ".x9f619:nth-child(2) .x193iq5w > .x1i10hfl",
         "priority": 6
       },
       "fallbacks": [
+        {
+        "type": "xpath",
+        "value": "//a[contains(@href, 'followers')]//strong",
+        "priority": 5
+        },
         {
           "type": "xpath",
           "value": "//a[contains(@href,'followers')]//span",
@@ -165,11 +172,16 @@
     },
     "profile.following_count": {
       "primary": {
-        "type": "xpath",
-        "value": "//a[contains(@href, 'following')]//strong",
+        "type": "css",
+        "value": ".x9f619:nth-child(2) > .x193iq5w > .x1i10hfl:nth-child(2)",
         "priority": 6
       },
       "fallbacks": [
+        {
+        "type": "xpath",
+        "value": "//a[contains(@href, 'following')]//strong",
+        "priority": 5
+        },
         {
           "type": "xpath",
           "value": "//a[contains(@href,'following')]//span",
@@ -183,46 +195,27 @@
       "attribute": "text"
     },
     "profile.bio": {
-      "primary": {
-        "type": "data-testid",
-        "value": "profile_intro_bio",
-        "priority": 6
-      },
+      "primary": 
+        {
+          "type": "css",
+          "value": ".xo6829q > .xeuugli",
+          "priority": 6
+        },
       "fallbacks": [
         {
           "type": "css",
-          "value": "div[data-testid='profile_intro_bio']",
+          "value": ".xp6pnuw > .xeuugli",
           "priority": 5
         },
         {
           "type": "xpath",
-          "value": "//div[contains(@class,'x1gslohp')]//span",
+          "value": ".//span[contains(@class,'x193iq5w')]",
           "priority": 4
         },
         {
-          "type": "css",
-          "value": "span.x193iq5w",
-          "priority": 3
-        },
-        {
-          "type": "xpath",
-          "value": "//span[contains(@class,'x193iq5w')]",
-          "priority": 2
-        },
-        {
-          "type": "css",
-          "value": ".xp6pnuw > .xeuugli",
-          "priority": 2
-        },
-        {
-          "type": "css",
-          "value": "[data-actual-height=\"50\"]",
-          "priority": 1
-        },
-        {
-          "type": "css",
-          "value": "[data-comp-id=\"6\"]",
-          "priority": 1
+          "type": "data-testid",
+          "value": "profile_intro_bio",
+          "priority": 6
         }
       ],
       "wait": {
@@ -233,14 +226,57 @@
     },
     "profile.address": {
       "primary": {
-        "type": "xpath",
-        "value": "//span[contains(@class,'x6s0dn4')]",
+        "type": "css",
+        "value": "span > span > span > span:nth-child(2) > span > span",
         "priority": 6
       },
       "fallbacks": [
         {
           "type": "css",
           "value": "[data-action-id=\"32747\"]",
+          "priority": 1
+        },
+        {
+        "type": "xpath",
+        "value": "//a[@role='tab'][.//span[contains(normalize-space(.), 'Nơi từng sống')]",
+        "priority": 6
+        }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 10000
+      },
+      "attribute": "text"
+    },
+    "profile.language": {
+      "primary": {
+        "type": "css",
+        "value": ".x6s0dn4 > .x193iq5w > span > .x1i10hfl",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//div[contains(@class,'x1i10hfl')]",
+          "priority": 1
+        }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 10000
+      },
+      "attribute": "text"
+    },
+    "profile.birthday": {
+      "primary": {
+          "type": "css",
+          "value": ".html-div:nth-child(2) > .x1i10hfl",
+          "priority": 6
+        },
+      "fallbacks": [
+        {
+          "type": "xpath",
+          "value": "//div[contains(@class,'x1i10hfl')]",
           "priority": 1
         }
       ],
@@ -290,25 +326,40 @@
     },
     "profile.gender": {
       "primary": {
-        "type": "xpath",
-        "value": "//span[contains(@class,'x193iq5w')]",
-        "priority": 5
-      },
+          "type": "css",
+          "value": ".xo1l8bm > .x3nfvp2",
+          "priority": 6
+        },
       "fallbacks": [
         {
           "type": "css",
           "value": ".xkh2ocl > .x78zum5 > .xu06os2 > .x193iq5w",
-          "priority": 3
+          "priority": 5
         },
+        {
+        "type": "xpath",
+        "value": "//span[contains(@class,'x193iq5w')]",
+        "priority": 4
+        }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 10000
+      },
+      "attribute": "text"
+    },
+    "profile.status": {
+      "primary": 
         {
           "type": "css",
-          "value": "#app-body",
-          "priority": 1
+          "value": "div:nth-child(2) > .xtqikln > .xkh2ocl",
+          "priority": 6
         },
+      "fallbacks": [
         {
-          "type": "xpath",
-          "value": "//*[@id='app-body']",
-          "priority": 1
+        "type": "xpath",
+        "value": "//div[contains(@class,'xkh2ocl')]",
+        "priority": 5
         }
       ],
       "wait": {
@@ -319,16 +370,35 @@
     },
     "profile.contact": {
       "primary": {
-        "type": "xpath",
-        "value": "//a[starts-with(@href,'http')]",
-        "priority": 5
+        "type": "css",
+        "value": ".x6s0dn4 > .x193iq5w > span > .x1i10hfl",
+        "priority": 6
       },
       "fallbacks": [
         {
           "type": "css",
           "value": "span > .x1fey0fg",
           "priority": 3
+        },
+        {
+          "type": "xpath",
+          "value": "//a[@role='tab'][.//span[contains(normalize-space(.), 'Thông tin liên hệ và cơ bản')]",
+          "priority": 6
         }
+      ],
+      "wait": {
+        "state": "presence",
+        "timeout_ms": 10000
+      },
+      "attribute": "text"
+    },
+    "profile.family": {
+      "primary": {
+        "type": "xpath",
+        "value": "//a[@role='tab'][.//span[contains(normalize-space(.), 'Gia đình và các mối quan hệ')]",
+        "priority": 6
+      },
+      "fallbacks": [
       ],
       "wait": {
         "state": "presence",
@@ -338,8 +408,8 @@
     },
     "profile.jobs": {
       "primary": {
-        "type": "css",
-        "value": ".x1n2onr6 .x1i10hfl",
+        "type": "xpath",
+        "value": "//*[contains(@class,'xtqikln')]/*[contains(@class,'xamitd3')]",
         "priority": 6
       },
       "fallbacks": [
@@ -364,14 +434,24 @@
     },
     "profile.education": {
       "primary": {
-        "type": "css",
-        "value": ".x1n2onr6 .x6s0dn4",
+        "type": "xpath",
+        "value": "//*[contains(@class,'xtqikln')]/*[contains(@class,'xkh2ocl')]/span/span",
         "priority": 6
       },
       "fallbacks": [
         {
+        "type": "css",
+        "value": "div:nth-child(2) > div > .x9f619 > .x9f619 > div:nth-child(2) > .x1i10hfl",
+        "priority": 5
+        },
+        {
           "type": "xpath",
-          "value": "//div[contains(@class,'x6s0dn4')]",
+          "value": "//*[contains(@class,'html-div')]//*[contains(@class,'xtqikln')]/*[contains(@class,'xkh2ocl')]/span/span",
+          "priority": 6
+        },
+        {
+          "type": "xpath",
+          "value": "//a[@role='tab'][.//span[contains(normalize-space(.), 'Công việc và học vấn')]",
           "priority": 4
         }
       ],
@@ -382,25 +462,6 @@
         "timeout_ms": 10000
       },
       "attribute": "text"
-    },
-    "profile.photos": {
-      "primary": {
-        "type": "xpath",
-        "value": "//a[contains(@href, 'photo.php')]//img",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "xpath",
-          "value": "//img[contains(@src,'fbcdn.net')]",
-          "priority": 4
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "src"
     }
   }
 }
