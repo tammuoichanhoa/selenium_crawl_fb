@@ -60,3 +60,4 @@ profiles/*
 chrome_profile/
 chrome_profile_/
 note.txt
+debug_artifacts/
