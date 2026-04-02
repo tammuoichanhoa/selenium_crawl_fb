@@ -91,10 +91,8 @@ def crawl_scroll_loop(
             idle_rounds_no_new_posts = 0
 
         if i > 0 and (i % CLEANUP_EVERY == 0):
-            try:
-                d.execute_script(CLEANUP_JS, DOM_KEEP)
-            except Exception:
-                pass
+            pass # Disable cleanup JS which breaks FB React Scroll
+
 
         try:
             cur_height = d.execute_script("return document.body.scrollHeight;")
@@ -110,7 +108,7 @@ def crawl_scroll_loop(
                 stall_count = 0
                 prev_height = cur_height
 
-        if stall_count >= STALL_THRESHOLD and idle_rounds_no_new_posts >= 10:
+        if stall_count >= STALL_THRESHOLD and idle_rounds_no_new_posts >= 30:
             logger.info(
                 "[STOP] Stall confirmed: no new posts for %d rounds & height stagnant.",
                 idle_rounds_no_new_posts,
