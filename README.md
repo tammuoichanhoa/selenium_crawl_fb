@@ -1,261 +1,121 @@
 # Facebook Selenium Crawler
 
-Dự án này là công cụ cào dữ liệu Facebook bằng **Selenium**. Hiện có 2 luồng chạy:
-1. **Crawler đa luồng** dùng `configs/config.json` + selector modules (hỗ trợ tải selector từ endpoint).
-2. **Extraction đơn luồng** dùng `configs/config.yml` với danh sách field (YAML).
+Dự án này là công cụ tự động cào dữ liệu Facebook (Profile, Page, Group...) bằng **Selenium**. Hệ thống được thiết kế để kết nối trực tiếp với API hàng đợi (Queue) để nhận nhiệm vụ, thực hiện thu thập thông tin chuyên sâu (Deep Crawl) song song đa luồng, và gửi kết quả về máy chủ.
 
-Tool hỗ trợ xoay User-Agent, proxy, login bằng cookie hoặc Chrome profile.
-
-## 📌 Luồng Hoạt Động (Workflow)
-
-Hệ thống có 2 nhánh chính:
-
-1. **Khởi tạo và Đăng nhập (`run_login.py`)**: 
-   - Script này dùng để đăng nhập Facebook thông qua Local Chrome Driver.
-   - Bạn có thể điền Cookie vào `.env` để tool tự động tiêm cookie, hoặc chọn đăng nhập bằng profile hiện có.
-   - Khi đăng nhập thành công bằng Cookies, hệ thống sẽ backup thư mục profile để tái dùng cho các worker sau này.
-   
-2. **Cào Dữ Liệu đa luồng (`run_crawler.py`)**:
-   - Trình phân phối sẽ nạp danh sách URL từ file `data/pages.txt`.
-   - Các URL được chia nhỏ thành các batch dựa trên số `MAX_WORKERS` (tối đa luồng song song).
-   - Mỗi Worker sẽ được cấp một cổng Debug (Debugger Port), sử dụng một bộ User-Agent, Proxy và Profile được chỉ định riêng biệt.
-   - Trình duyệt sẽ được tự động mở (headless hoặc không ảo), truy cập trang, đợi load xong và tuân theo các **Selector** (XPath/CSS) trong file `configs/config.json` để nhặt dữ liệu (như tên, số follower, số theo dõi, bio, email, ...).
-   - Kết quả xuất ra file `.json`, mặc định: `outputs/crawl_results.json`.
-
+Công cụ hỗ trợ mạnh mẽ việc xoay vòng User-Agent, proxy, gỡ lỗi cổng, và sử dụng Cookies hoặc Chrome Profile để duy trì phiên đăng nhập.
 
 ---
 
 ## 🛠 Yêu Cầu Hệ Thống
 
-* **Hệ điều hành:** Linux, macOS, Windows.
+* **Hệ điều hành:** Khuyến nghị Linux, macOS hoặc Windows.
 * **Ngôn ngữ:** Python 3.10 trở lên.
-* **Trình duyệt:** Cần cài đặt sẵn [Google Chrome](https://www.google.com/chrome/).
-* **Driver:** `chromedriver` tương thích cực khít với phiên bản Google Chrome hiện có trên máy (Script sẽ linh hoạt sử dụng cơ chế nội bộ nếu cần).
+* **Trình duyệt:** Bắt buộc cài đặt [Google Chrome](https://www.google.com/chrome/).
+* **Driver:** Hệ thống có cơ chế tự tìm và tích hợp WebDriver phù hợp với bản Chrome hiện tại qua cơ chế nội bộ của Selenium Manager.
 
 ---
 
-## 🚀 Hướng Dẫn Cài Đặt Khởi Tạo
+## 🚀 Hướng Dẫn Cài Đặt (Setup)
 
-1. **Clone mã nguồn (nếu có):**
+1. **Clone mã nguồn (nếu chưa có):**
     ```bash
     git clone <repository_url>
     cd facebook_crawler
     ```
 
 2. **Cài đặt thư viện Python:**
-    Nên sử dụng môi trường ảo hóa (`venv` hoặc `conda`).
+    Tạo môi trường ảo hóa (`venv` hoặc `conda`) để tránh va chạm thư viện hệ thống:
     ```bash
     python -m venv venv
-    source venv/bin/activate  # Trên Linux/macOS
-    # Trên Windows: venv\\Scripts\\activate
+    
+    # Kích hoạt môi trường (trên Windows)
+    venv\Scripts\activate
+    
+    # Kích hoạt môi trường (trên Linux/macOS)
+    source venv/bin/activate
+    
+    # Cài đặt file requirements
     pip install -r requirements.txt
     ```
 
-3. **Tạo các thư mục bắt buộc (nếu chưa có):**
-    ```bash
-    mkdir -p data configs outputs chrome_profile chrome_profiles
+3. **Cấu hình môi trường (`.env`):**
+    Copy file mẫu `.env.example` sang `.env` (hoặc tạo file mới ` .env ` ở thư mục gốc) chứa các thiết lập cốt lõi:
+    ```env
+    # Mẫu .env khởi tạo
+    API_KEY=your_api_token_here
+    COOKIES=c_user=...;xs=...;fr=...;
+    LOGIN_METHOD=cookies
+    PROFILE_DIR=./chrome_profile
+    MAX_WORKERS=3
+    HEADLESS=false # Đặt true nếu chạy trên server ẩn UI
     ```
 
 ---
 
-## ⚙️ Hướng Dẫn Cấu Hình (Configurations)
+## 🏃 Cách Chạy Ứng Dụng (How to run)
 
-Phần cấu hình bao gồm `.env`, `configs/config.json` (crawler đa luồng) và `configs/config.yml` (extraction đơn luồng).
+Điểm bắt đầu (Entry point) chính của tool là file `main.py`. Tool được thiết kế theo mô hình vòng lặp tự động: **Xin nhiệm vụ -> Cào dữ liệu -> Trả kết quả**.
 
-### 1. File `.env`
-Tạo một file `.env` ở thư mục gốc của dự án. File này chứa các thiết lập môi trường hệ thống mạng và xác thực:
-
-```env
-# Xác thực (Dùng cho quá trình login)
-COOKIES=c_user=...;xs=...;fr=...;
-LOGIN_METHOD=cookies             # Chọn 'cookies' hoặc 'profile'
-PROFILE_DIR=./chrome_profile     # Thư mục lưu dữ liệu session/profile
-
-# Worker (Luồng chạy song song)
-MAX_WORKERS=3
-PORT_RANGE_MIN=8000
-PORT_RANGE_MAX=9999
-PORT_POOL_SIZE=100
-
-# Giả lập thiết bị (Fingerprint)
-HEADLESS=true                    # Chạy ngầm (true) hoặc hiện UI (false)
-USER_AGENTS_FILE=data/user_agents.txt
-PROXIES_FILE=data/proxies.txt
-# PROXY=http://user:pass@127.0.0.1:3128
-
-# Chrome binary (tuỳ chọn)
-# CHROME_BINARY=/path/to/chrome
-# CHROME_BINARY_WIN_PATH=C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
-
-# Override URL (tuỳ chọn)
-# FB_HOME_URL=https://www.facebook.com/
-# FB_LOCALE_URL=https://www.facebook.com/?locale=vi_VN
-
-# Bật gỡ lỗi Selector (Selector Debug)
-SELECTOR_DEBUG=1
-SELECTOR_LOG_CONFIG=1
-SELECTOR_CAPTURE=1
-SELECTOR_CAPTURE_DIR=./debug_artifacts
-
-# Selector remote (tuỳ chọn)
-# SELECTOR_ENDPOINT=https://<your-endpoint>/configs/auto-node
-# SELECTOR_CACHE_DIR=./selector_cache
-# SELECTOR_SITE=facebook
-# SELECTOR_ENV=prod
-# SELECTOR_MODULE=page
-# SELECTOR_PAGE=about
-# SELECTOR_AUTO_DOWNLOAD=1
+### Chạy trực tiếp qua API (Môi trường Thực tế)
+```bash
+python main.py
 ```
+> **Luồng tác vụ:** Tool sẽ đọc `API_KEY` từ biến môi trường (hoặc `.env`), tự động đẩy yêu cầu lấy công việc từ máy chủ. Sau cài cào xong, hệ thống ngầm đóng gói kết quả và POST trả `event_type: complete` về máy chủ.
 
-### 2. Dữ Liệu Đầu Vào (`data/`)
-- **`data/pages.txt`**: Khai báo danh sách URL sẽ đi cào (Mỗi URL 1 dòng). Dùng ký tự `#` để comment dòng.
-- **`data/user_agents.txt`**: Khai báo danh sách user agents (mỗi user agent 1 dòng).
-- **`data/proxies.txt`**: (Tuỳ chọn) danh sách proxy.
-- **`data/cookies.txt`**: (Tuỳ chọn cho `run_extraction.py`) file JSON cookies export từ browser/extension.
-
-### 3. Khai Báo Selectors cho crawler đa luồng (`configs/config.json`)
-File này chịu trách nhiệm trỏ đúng cấu trúc HTML của FB để cào dữ liệu. Thiết kế hỗ trợ *modules*.
-
-```json
-{
-  "login": {
-    "method": "cookies",
-    "headless": false,
-    "profile_dir": "./chrome_profile"
-  },
-  "crawl": {
-    "pages_file": "data/pages.txt",
-    "output_file": "outputs/crawl_results.json",
-    "max_workers": 3,
-    "wait_after_load": 3,
-    "element_timeout": 15
-  },
-  "selectors": {
-    "modules": {
-      "profile": {
-        "site": "facebook",
-        "module": "profile",
-        "elements": {
-          "profile.name": {
-            "primary": { "type": "tagName", "value": "h1", "priority": 6 },
-            "fallbacks": [
-              { "type": "xpath", "value": "//h1", "priority": 5 }
-            ],
-            "attribute": "text"
-          }
-        }
-      }
-    }
-  }
-}
-```
-*Lưu ý: Bạn có thể chọn target của module nào được chạy trong `run_crawler.py` (ví dụ chạy module Profile thay vì Page).*
-
-### 4. Khai Báo Fields cho extraction đơn luồng (`configs/config.yml`)
-File này định nghĩa danh sách fields cần trích xuất (YAML).
-
-```yaml
-login:
-  profile_path: chrome_profiles/facebook
-  profile_name: Default
-  cookies_file: data/cookies.txt
-  user_agents_file: data/user_agents.txt
-  proxies_file: data/proxies.txt
-
-crawl:
-  pages_file: data/pages.txt
-  output_file: outputs/pages_data.json
-  page_wait_seconds: 4
-  field_timeout: 25
-
-fields:
-  - name: page_name
-    by: xpath
-    selector: "(//h1[contains(@class,'html-h1')])[1]"
-    attribute: text
-    wait_until: visible
+### Chạy để Test 1 UID/Fanpage cụ thể (Bỏ qua cấu hình Queue)
+Nếu bạn chỉ muốn kiểm thử 1 fanpage (ví dụ trang `cambongda`) mà không gọi qua API lấy lệnh ngoài:
+```bash
+python main.py --test-uid cambongda --selector-module page
 ```
 
 ---
 
-## 🏃 Chạy Ứng Dụng
+## 🚩 Các Cờ Tham Số (Flags) cho `main.py`
 
-### Test thử Login khởi tạo session (Chỉ Cần Làm 1 Lần)
-Đầu tiên, chạy tập lệnh Login để nhúng cookie / khởi tạo thư mục profile gốc.
-
-```bash
-python run_login.py
-```
-> **Giải thích**: Script sẽ đọc `.env` (lấy `COOKIES` và `PROFILE_DIR`), mở trình duyệt thật lên. Nếu phương thức `login_method=cookies`, script tiêm cookie thẳng vào trang và tải lại để xác nhận. Cuối cùng, nó sẽ *Back up* folder profile `chrome_profile` để tái dùng khi Crawler chạy đa luồng. Hãy ấn `Enter` trên Terminal để tắt khi đã thấy login mượt.
-
-### Test thử Chạy Crawler đa luồng
-Hãy đảm bảo file `data/pages.txt` đã có chứa các URL của Facebook (ví dụ link Profile, Group).
-
-```bash
-python run_crawler.py
-```
-> **Kết quả**: Console sẽ in ra tiến trình của các worker. Cuối cùng dữ liệu được dump vào `outputs/crawl_results.json` theo định dạng mảng (Array) ứng với từng trang ở `pages.txt`.
-
-#### 🚩 Các Command Line Flags (Khởi chạy bằng tay tham số cấu hình)
-`run_crawler.py` hỗ trợ các cờ (flags) để đè lên cấu hình mặc định (ghi đè `.env` và `configs/config.json`):
-
-1. **`--max-workers <num>`**: Cưỡng chế chạy với số luồng tự định.
-   ```bash
-   python run_crawler.py --max-workers 5
-   ```
-
-2. **`--selector-module <module_name>`**: Chọn module muốn cào trong JSON (ví dụ `'page'`, `'profile'`, `'group'`).
-   ```bash
-   python run_crawler.py --selector-module profile
-   ```
-
-### Dequeue và crawl theo UID từ hàng đợi
-Script `scripts/dequeue_and_crawl.py` dùng để gọi API hàng đợi, nhận danh sách UID và chạy crawler theo cơ chế `fbprofile`.
-
-```bash
-python scripts/dequeue_and_crawl.py --api-key <YOUR_API_KEY>
-```
-
-**Lưu ý quan trọng:** Hiện script đang bật test mode mặc định bằng cách gán `args.test_uid = "cambongda"` trong `scripts/dequeue_and_crawl.py`. Nếu muốn dùng queue thật, hãy bỏ hoặc comment dòng này.
-
-**Tùy chọn thường dùng:**
-1. **`--api-key <key>`**: API key (hoặc set `API_KEY` trong môi trường).
-2. **`--max-workers <num>`**: Override số luồng crawl.
-3. **`--selector-module <module_name>`**: Ép module selector (ví dụ `profile`, `page`).
-4. **`--test-uid <uid>`**: Chạy test với 1 UID, không gọi queue.
-5. **`--out <path>`**: Lưu kết quả JSON ra file.
-6. **`--events-url <url>`**: Endpoint nhận event hoàn thành (mặc định dùng trong script).
-
-### Bước 3: Chạy Extraction đơn luồng (YAML)
-```bash
-python run_extraction.py
-```
-> **Kết quả**: JSON được lưu vào `outputs/pages_data.json` (hoặc file bạn override).
-
-#### 🚩 Flags cho `run_extraction.py`
-1. **`--config <path>`**: Chọn file YAML (mặc định `configs/config.yml`).
-2. **`--pages-file <path>`**: Override danh sách URL.
-3. **`--output-file <path>`**: Override JSON output.
-4. **`--profile-path <path>`**, **`--profile-name <name>`**: Override profile.
-5. **`--cookies-file <path>`**: Override cookies JSON. Nếu file không tồn tại sẽ fallback sang `COOKIES` trong `.env`.
-6. **`--user-agent <ua>`**, **`--proxy <url>`**, **`--user-agents-file <path>`**, **`--proxies-file <path>`**.
+| Flag | Chức năng chi tiết | Tùy chọn đi kèm ví dụ |
+| :--- | :--- | :--- |
+| `--test-uid` | Khởi chạy Crawler chỉ tập trung cào duy nhất Account UID (hoặc URL rút gọn) này để test. Bỏ qua luồng gọi lấy tác vụ từ Hàng đợi API. | `--test-uid cambongda` |
+| `--max-workers` | Chèn đè (Override) lượng luồng Webdriver song song đang cố định gốc. Phù hợp nếu máy mạnh muốn chạy đa trình duyệt. | `--max-workers 3` |
+| `--selector-module` | Ép công cụ dùng bộ logic cạo của cấu hình cho trước (có thể là `page`, `profile`, `group`) thay vì Tool tự dự đoán. | `--selector-module page` |
+| `--api-key` | Token để xác thực lấy Việc / Nộp Việc qua API. Truyền vào đây làm biến ưu tiên. | `--api-key abcxyz...` |
+| `--events-url` | Chỉ định URL của hệ thống nhận/lắng nghe báo cáo tiến độ và tiếp nhận Database thu thập được. | `--events-url https://api/...` |
+| `--out` | Đường dẫn file lưu cứng lại JSON toàn bộ Output để kiểm thử độc lập ở Local. | `--out crawl_results.json` |
 
 ---
 
-## 🛑 Bắt Lỗi & Xử Lý Sự Cố (Troubleshooting)
+## 🔄 Luồng Gọi API và Xử Lý Dữ Liệu (API Flow)
 
-1. **Lỗi `Unable to verify Facebook login` (Tạch Checkpoint / Rớt Cookie)**:
-   - *Nguyên nhân:* Chuỗi `COOKIES` bị chết (expired) hoặc IP của bạn bị FB hất văng do bất thường.
-   - *Giải pháp:* Lấy lại Cookie mới, xóa nội dung trong thư mục `PROFILE_DIR` và chạy lại `python run_login.py`. Đảm bảo Proxy đang sống.
+Quá trình crawler diễn ra theo các bước giao tiếp API khép kín sau đây:
 
-2. **Lỗi `Failed to capture '<element>' on <url>` (Lỗi Không Tìm Thấy Phần Tử)**:
-   - *Nguyên nhân:* Facebook thay đổi giao diện/cấu trúc code, hoặc do tốc độ mạng quá chậm nên timeout (`element_timeout = 15s`).
-   - *Giải pháp:* Bật `HEADLESS=false` trong môi trường `.env` hoặc `config.json` để mắt nhìn thấy giao diện trình duyệt trực tiếp -> vào DevTools dò XPath/CSS mới cập nhật lại mảng `fallbacks` của thẻ đó trong `configs/config.json`.
+1. **Dequeue Task (Nhận tác vụ API):**
+   - File `main.py` tiến hành đóng gói Header (chứa `Authorization: Bearer <API_KEY>`) để gọi lên đường dẫn Queue System.
+   - Nhận về danh sách JSON chứa các `task_id` và đối tượng (`UID/URL`) cần cào. 
 
-3. **Lỗi Crash / Treo Luồng (Port in use)**:
-   - *Nguyên nhân:* Port debug của Selenium bị gác kiếm chưa kịp close ở lần chạy trước.
-   - *Giải pháp:* Kiểm tra hệ thống, kill tất cả tiến trình Google Chrome (`killall chrome` hoặc `taskkill /F /IM chrome.exe`). Mở rộng `PORT_RANGE_MAX` trong `.env`.
+2. **Khởi tạo và Phân bổ Chạy Đa Luồng:**
+   - Số lượng UID mục tiêu được chia nhét vào các bộ Batch.
+   - Luồng nền `ThreadPoolExecutor` mở ra theo số lượng `--max-workers`. Mỗi một luồng chiếm dụng 1 cổng debug (Port), gắn Cookie và nạp Proxy mở sẵn màn hình Chrome.
 
-4. **Lỗi `Missing file: .../configs/pages.txt` khi chạy `run_extraction.py`**:
-   - *Nguyên nhân:* `pages_file` đang trỏ tương đối theo `configs/`.
-   - *Giải pháp:* Để `pages_file: data/pages.txt` trong `configs/config.yml` hoặc dùng `--pages-file`.
+3. **Thu thập dữ liệu chuyên sâu (Deep Crawling Workflow):**
+   - Trình duyệt truy cập tận gốc mục tiêu.
+   - **Page Info:** Quét sâu HTML: Lấy Tên, Lượt theo dõi, Avatar, Cover. Đặc biệt lấy dải ảnh High-Res (Độ phân giải siêu cao) bằng kỹ thuật *Nhân bản Tab ẩn (Tab Batching)*. Thu thập mục giới thiệu, tin đáng chú ý. Kết quả tạm lưu cache vào `database/profile/page/<tên>/profile_info.json`.
+   - **Post Data:** Cuộn chuột lặp liên tục dải Timeline, cào toàn bộ nội dung Post từng giây, đóng dồn vào file Database cục bộ `posts_all.ndjson`. Mỗi mốc cuộn lại lưu Checkpoint bảo hiểm (tránh hỏng data).
+   - **Đóng gói Kết quả:** Hệ thống đọc 2 file Database `profile_info` và toàn bộ nội dung file `posts_all.ndjson` gộp chung lại vào một biến từ điển Python (`page_data`).
+
+4. **Trả kết quả (Submit / Post Event):**
+   - `main.py` gọi hàm `_post_event()` để nhồi toàn bộ gói dữ liệu JSON `page_data` vô thuộc tính Payload của HTTP POST Request và bắn sang cho `--events-url`. Header vẫn tuân thủ kèm khóa `API_KEY`. Tác vụ hoàn tất vòng đời.
+
+---
+
+## 🛑 Bắt Lỗi & Xử Lý Sự Cố Thường Gặp (Troubleshooting)
+
+1. **Lỗi `[WinError 10061] Connection refused` hoặc `Max retries exceeded with url`**:
+   - *Nguyên nhân:* Cửa sổ Chrome bị tắt cưỡng bức bằng tay (dấu X màu đỏ), hoặc máy tính thiếu RAM dẫn tới trình duyệt "Crash" khiến ống thông tin giữa Selenium và hệ điều hành bị sập đứt đoạn.
+   - *Cách xử lý:* Nếu máy yếu, giảm thông số `--max-workers 1`. Đừng bao giờ tắt thủ công cửa sổ Chrome khi log màn hình đang chạy chữ `[worker 1]`.
+
+2. **Lỗi Không Login được Facebook (Tạch tài khoản / Trắng xóa Cookie)**:
+   - *Nguyên nhân:* Chuỗi Cookie do bạn gắn trong tệp `.env` đã vi phạm ngày hết hạn, hoặc bị Facebook đá phiên.
+   - *Cách xử lý:* Hãy trích xuất Cookie tươi lại từ Extension và đút vào `.env`. (Có thể dùng profile session để lưu lâu năm).
+
+3. **Công cụ thu thập bài viết bị hẫng hoặc không thu bài nào**:
+   - *Nguyên nhân:* Gặp Pop-up làm mờ nền màn hình yêu cầu Đăng nhập của Facebook cản trở tầm nhìn thẻ Div của DOM, và làm kẹt thao tác Cuộn (Scroll) chuỗi timeline.
+   - *Cách khắc phục:* Đảm bảo trạng thái tài khoản Cookie cung cấp phải ở trạng thái sống khỏe và log-in trên trình duyệt. Mở thử trình duyệt ẩn lên trực quan xem Fanpage có đang khóa Vùng Địa Lý quốc gia với Account đang Crawler hay không.

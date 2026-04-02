@@ -542,6 +542,7 @@ def _crawl_from_uids(
                 default_wait_cfg=default_wait_cfg,
                 selector_debug_cfg=selector_debug_cfg,
                 profile_backup_name=profile_backup_name if worker_id == 1 else None,
+                selector_module=selector_module,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]
