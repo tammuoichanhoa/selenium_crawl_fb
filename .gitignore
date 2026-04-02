@@ -60,3 +60,4 @@ profiles/*
 chrome_profile/
 chrome_profile_/
 source_html_page_info.html
+debug_artifacts/
