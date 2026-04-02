@@ -15,6 +15,7 @@ from pathlib import Path
 from src.fbprofile.storage.paths import compute_paths
 from src.fbprofile.browser.hooks import install_early_hook
 from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
+from src.fbprofile.browser.get_page_info import scrape_full_page_info
 from src.fbprofile.browser.navigation import go_to_date
 from src.fbprofile.browser.scroll import crawl_scroll_loop
 from src.fbprofile.storage.checkpoint import save_checkpoint
@@ -160,6 +161,7 @@ def crawl_pages_batch(
     default_wait_cfg: Dict[str, Any] | None,
     selector_debug_cfg: Dict[str, Any] | None,
     profile_backup_name: str | None = None,
+    selector_module: str | None = None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
     logger.info(
@@ -226,7 +228,10 @@ def crawl_pages_batch(
                 profile_info_path = database_path / "profile_info.json"
 
                 install_early_hook(driver, keep_last=350)
-                scrape_full_profile_info(driver, url, profile_info_path)
+                if selector_module == "profile":
+                    scrape_full_profile_info(driver, url, profile_info_path)
+                else:
+                    scrape_full_page_info(driver, url, profile_info_path)
 
                 page_data = crawl_page(
                     driver,
@@ -269,7 +274,20 @@ def crawl_pages_batch(
                             profile_data = json.load(f)
                     except: pass
                 
+                posts_data = []
+                if out_ndjson.exists():
+                    try:
+                        import json
+                        with open(out_ndjson, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line:
+                                    posts_data.append(json.loads(line))
+                    except Exception as e:
+                        logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
+
                 page_data["profile_info"] = profile_data
+                page_data["posts"] = posts_data
                 page_data["posts_collected"] = len(seen_ids)
                 page_data["output_ndjson"] = str(out_ndjson)
 
@@ -550,6 +568,7 @@ def main() -> None:
                 login_stagger_seconds=login_stagger_seconds,
                 default_wait_cfg=default_wait_cfg,
                 selector_debug_cfg=selector_debug_cfg,
+                selector_module=selector_module,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]

@@ -9,7 +9,7 @@ def compute_paths(data_root: Path, page_name: str, account_tag: str):
         base = base / f"ACC_{account_tag}"
 
     out_ndjson = base / "posts_all.ndjson"
-    raw_dump_dir = base / "raw_dump_posts"
+    raw_dump_dir = base
     checkpoint = base / "checkpoint.json"
 
     base.mkdir(parents=True, exist_ok=True)
