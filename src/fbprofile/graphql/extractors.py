@@ -417,7 +417,8 @@ def extract_share_flags_smart(n: dict, actor_text: str = None):
 # Post collectors (ưu tiên rid + link + created_time)
 # =========================
 def _is_story_node(n: dict) -> bool:
-    if n.get("__typename") == "Story": return True
+    t = n.get("__typename") or n.get("typename") or ""
+    if t in ("Story", "Video", "Reel"): return True
     if n.get("__isFeedUnit") == "Story": return True
     if "post_id" in n or "comet_sections" in n: return True
     return False
