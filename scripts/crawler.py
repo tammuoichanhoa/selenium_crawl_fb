@@ -243,12 +243,12 @@ def crawl_pages_batch(
                     selector_debug_cfg,
                 )
 
-                # target_date = datetime.date.today()
-                # if "group" not in url:
-                #     try:
-                #         go_to_date(driver, target_date)
-                #     except Exception as e:
-                #         logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
+                target_date = datetime.date.today()
+                if "group" not in url:
+                    try:
+                        go_to_date(driver, target_date)
+                    except Exception as e:
+                        logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
 
                 seen_ids = set()
                 ts_state = {"latest": None, "earliest": None}
