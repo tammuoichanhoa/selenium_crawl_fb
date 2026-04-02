@@ -33,6 +33,7 @@ from src.utils import (
     str_to_bool,
     validate_selector_payload,
 )
+from src.utils.task_flow import infer_module_for_item
 
 
 logger = logging.getLogger(__name__)
@@ -665,7 +666,7 @@ def main() -> int:
         group_items = group["items"]
         module_buckets: Dict[str | None, List[Dict[str, Any]]] = {}
         for item in group_items:
-            inferred = _infer_module_for_item(item, selector_modules, args.selector_module)
+            inferred = infer_module_for_item(item, selector_modules, args.selector_module)
             item["selector_module"] = inferred
             module_buckets.setdefault(inferred, []).append(item)
 
