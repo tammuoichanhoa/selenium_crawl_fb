@@ -9,8 +9,19 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
+import datetime
+from pathlib import Path
+import traceback
 
-from selenium.webdriver.common.by import By
+from src.fbprofile.storage.paths import compute_paths
+from src.fbprofile.browser.hooks import install_early_hook
+from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
+# from src.fbprofile.browser.get_page_info import scrape_full_page_info
+from src.fbprofile.browser.navigation import go_to_date
+from src.fbprofile.browser.scroll import crawl_scroll_loop
+from src.fbprofile.storage.checkpoint import save_checkpoint
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from src.utils import (
     build_port_queue,
@@ -246,8 +257,26 @@ def crawl_pages_batch(
             ]
 
         results: List[Tuple[int, Dict[str, Any]]] = []
-        for position, (index, url) in enumerate(indexed_pages):
+        for position, (index, uid_or_url) in enumerate(indexed_pages):
+            url = uid_or_url
+            if not str(url).startswith("http"):
+                url = f"https://www.facebook.com/{url}"
+
             try:
+                page_name = str(url).split('/')[-1].split('?')[0]
+                if not page_name: page_name = str(url)
+                
+                data_root = str(Path(PROJECT_ROOT) / "database")
+                database_path, out_ndjson, raw_dumps_dir, checkpoint = compute_paths(
+                    Path(data_root).resolve(), page_name, ""
+                )
+                profile_info_path = database_path / "profile_info.json"
+
+                install_early_hook(driver, keep_last=350)
+                if selector_module == "profile":
+                    scrape_full_profile_info(driver, url, profile_info_path)
+                else:
+                    scrape_full_page_info(driver, url, profile_info_path)
                 page_data = crawl_page(
                     driver,
                     url,
@@ -263,6 +292,53 @@ def crawl_pages_batch(
                     selector_debug_cfg_profile,
                     selector_debug_cfg_page,
                 )
+                target_date = datetime.date.today()
+                if "group" not in url:
+                    try:
+                        go_to_date(driver, target_date)
+                    except Exception as e:
+                        logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
+
+                seen_ids = set()
+                ts_state = {"latest": None, "earliest": None}
+
+                crawl_scroll_loop(
+                    driver,
+                    group_url=url,
+                    out_path=out_ndjson,
+                    seen_ids=seen_ids,
+                    keep_last=350,
+                    max_scrolls=10000,
+                    ts_state=ts_state,
+                )
+
+                if ts_state["latest"] is not None:
+                    save_checkpoint(checkpoint, ts_state["latest"])
+
+                profile_data = {}
+                if profile_info_path.exists():
+                    try:
+                        import json
+                        with open(profile_info_path, "r", encoding="utf-8") as f:
+                            profile_data = json.load(f)
+                    except: pass
+                
+                posts_data = []
+                if out_ndjson.exists():
+                    try:
+                        import json
+                        with open(out_ndjson, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line:
+                                    posts_data.append(json.loads(line))
+                    except Exception as e:
+                        logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
+
+                page_data["profile_info"] = profile_data
+                page_data["posts"] = posts_data
+                page_data["posts_collected"] = len(seen_ids)
+                page_data["output_ndjson"] = str(out_ndjson)
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
                 page_data = {"url": url, "error": str(exc)}

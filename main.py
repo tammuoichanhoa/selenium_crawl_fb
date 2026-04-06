@@ -5,10 +5,11 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List
-
+from typing import Any, Dict, List, Tuple
+from urllib.parse import parse_qs, urlparse
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -17,18 +18,23 @@ from scripts.crawler import crawl_pages_batch, _normalize_selector_modules
 from scripts.dequeue_task import run_curl
 from src.utils import (
     build_port_queue,
+    guard_fragile_locators,
     DEFAULT_CONFIG_PATH,
     load_config,
     load_env_file,
+    normalize_elements_config,
     resolve_max_workers,
     resolve_profile_dirs,
+    resolve_selector_payload,
     select_working_proxy,
     setup_logging,
     split_pages_for_workers,
     str_to_bool,
+    validate_selector_payload,
 )
 from src.utils.task_flow import (
     build_selector_config,
+    _build_selector_config,
     collect_uids,
     extract_account_cookie,
     extract_account_uid,
@@ -44,7 +50,7 @@ from src.utils.task_flow import (
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_EVENTS_URL = "https://gasoline-asn-protecting-pictures.trycloudflare.com/events"
+DEFAULT_EVENTS_URL = "https://latex-card-walk-donor.trycloudflare.com/events"
 # DEFAULT_ACCOUNT_COOKIES_FILE = "V1CM69c1f0b094cbc.txt"
 
 
@@ -93,7 +99,7 @@ def _crawl_from_uids(
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
 
-    elements_cfg, default_wait_cfg, selector_debug_cfg = build_selector_config(
+    elements_cfg, default_wait_cfg, selector_debug_cfg = _build_selector_config(
         config,
         crawl_cfg,
         env,
@@ -223,20 +229,43 @@ def main() -> int:
         default=DEFAULT_EVENTS_URL,
         help="Events endpoint URL to post completion payload.",
     )
+    parser.add_argument(
+        "--test-uid",
+        dest="test_uid",
+        help="Provide a static UID to crawl directly without waiting for dequeue API.",
+    )
     args = parser.parse_args()
 
-    if not args.api_key:
-        logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
-        return 2
-
-    result = run_curl(args.api_key)
-    if result.returncode != 0:
-        logger.error("Dequeue request failed: %s", result.stderr.strip())
-        return result.returncode
-
-    payload = parse_dequeue_payload(result.stdout or "")
-    items = extract_items(payload)
     env = load_env_file(".env")
+    if not args.api_key:
+        args.api_key = env.get("API_KEY")
+
+    if args.test_uid:
+        logger.info("[TEST MODE] Skipping API queue, using static test UID: %s", args.test_uid)
+        items = [{
+            "task_id": "test_id_999",
+            "uid": args.test_uid,
+            "social_type": "facebook",
+            "crawl_types": ["page"],
+        }]
+    else:
+        if not args.api_key:
+            logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
+            return 2
+
+        result = run_curl(args.api_key)
+        if result.returncode != 0:
+            logger.error("Dequeue request failed: %s", result.stderr.strip())
+            return result.returncode
+
+        payload = parse_dequeue_payload(result.stdout or "")
+        print("payload>>>>>>>>>", payload)
+        items = extract_items(payload)
+
+    if not items:
+        logger.info("Queue is empty or contains no valid tasks. Exiting safely.")
+        return 0
+
     #@anhtb temp cookies for test
     account_cookies_file = env.get("ACCOUNT_COOKIES_FILE")
     account_cookies = load_account_cookies(account_cookies_file)
