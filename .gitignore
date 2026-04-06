@@ -61,3 +61,6 @@ chrome_profile/
 chrome_profile_/
 note.txt
 debug_artifacts/
+main_comparison.md
+main_thai.py
+scripts/crawler_thai.py
