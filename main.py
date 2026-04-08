@@ -37,7 +37,7 @@ from src.utils.task_flow import infer_module_for_item
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_EVENTS_URL = "https://gasoline-asn-protecting-pictures.trycloudflare.com/events"
+DEFAULT_EVENTS_URL = "https://latex-card-walk-donor.trycloudflare.com/events"
 # DEFAULT_ACCOUNT_COOKIES_FILE = "V1CM69c1f0b094cbc.txt"
 
 
@@ -448,6 +448,7 @@ def _crawl_from_uids(
     max_workers_override: int | None,
     cookies_override: str | None = None,
     profile_backup_name: str | None = None,
+    anonymous: bool = False,           # ← Flag quét ẩn danh
 ) -> List[Dict[str, Any]]:
     crawl_cfg = config["crawl"]
     login_cfg = config["login"]
@@ -544,6 +545,7 @@ def _crawl_from_uids(
                 selector_debug_cfg=selector_debug_cfg,
                 profile_backup_name=profile_backup_name if worker_id == 1 else None,
                 selector_module=selector_module,
+                anonymous=anonymous,   # ← Truyền xuống worker
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]
@@ -589,6 +591,12 @@ def main() -> int:
         "--test-uid",
         dest="test_uid",
         help="Cung cấp UID tĩnh để crawl test trực tiếp mà không cần chờ API.",
+    )
+    parser.add_argument(
+        "--anonymous",
+        action="store_true",
+        default=False,
+        help="Chế độ quét ẩn danh: bỏ qua đăng nhập, không inject cookies (public data only).",
     )
     args = parser.parse_args()
     env = load_env_file(".env")
@@ -679,6 +687,7 @@ def main() -> int:
                 max_workers_override=args.max_workers,
                 cookies_override=group.get("cookies"),
                 profile_backup_name=group.get("account_uid"),
+                anonymous=False
             )
             for item, page_result in zip(module_items, results):
                 indexed_results[item["_index"]] = {

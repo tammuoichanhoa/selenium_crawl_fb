@@ -162,12 +162,17 @@ def crawl_pages_batch(
     selector_debug_cfg: Dict[str, Any] | None,
     profile_backup_name: str | None = None,
     selector_module: str | None = None,
+    anonymous: bool = False,          # ← Flag quét ẩn danh
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
     logger.info(
         f"[worker {worker_id}] Starting with {len(indexed_pages)} page(s) "
         f"using {profile_label}"
     )
+    # Chế độ ẩn danh: override login_method
+    effective_login_method = "anonymous" if anonymous else login_method
+    if anonymous:
+        logger.info("[worker %s] 🕵️ Anôn mode: không đăng nhập, quét công khai.", worker_id)
     if login_stagger_seconds > 0 and worker_id > 1:
         delay = login_stagger_seconds * (worker_id - 1)
         logger.info("[worker %s] Waiting %ss before login", worker_id, delay)
@@ -190,7 +195,7 @@ def crawl_pages_batch(
     try:
         try:
             driver = create_logged_in_driver(
-                login_method=login_method,
+                login_method=effective_login_method,
                 cookies_raw=cookies_raw,
                 user_agent=user_agent,
                 headless=headless,
@@ -199,7 +204,7 @@ def crawl_pages_batch(
                 chrome_binary=chrome_binary,
                 debug_port=debug_port,
                 home_url=fb_home_url or "https://www.facebook.com/",
-                locale_url=fb_locale_url or "https://www.facebook.com/?locale=vi_VN",
+                locale_url=fb_locale_url or "https://www.facebook.com/?locale=en_US",
                 chrome_binary_win_path=chrome_binary_win_path,
                 chrome_binary_candidates=chrome_binary_candidates,
                 profile_backup_name=profile_backup_name,
@@ -323,6 +328,12 @@ def main() -> None:
         "--selector-module",
         dest="selector_module",
         help="Selector module to use (overrides env/config).",
+    )
+    parser.add_argument(
+        "--anonymous",
+        action="store_true",
+        default=False,
+        help="Chế độ quét ẩn danh: bỏ qua đăng nhập, không inject cookies.",
     )
     args = parser.parse_args()
     '''
@@ -569,6 +580,7 @@ def main() -> None:
                 default_wait_cfg=default_wait_cfg,
                 selector_debug_cfg=selector_debug_cfg,
                 selector_module=selector_module,
+                anonymous=args.anonymous,  # ← Truyền flag ẩn danh
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]

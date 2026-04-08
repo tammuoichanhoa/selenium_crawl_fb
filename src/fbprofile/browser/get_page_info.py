@@ -337,72 +337,398 @@ def get_page_pictures(driver, target_url, timeout: int = 20) -> list:
     return list(set(image_urls))
 
 # ==========================================
-# 5. FRIENDS (Bạn bè)
+# 5. FOLLOWERS / FOLLOWING / MUTUAL (Scroll vô hạn)
 # ==========================================
-def get_page_followers(driver, target_url, timeout: int = 5) -> list:
-    """Lấy danh sách Người theo dõi (Followers) trên Fanpage (có cuộn trang)."""
-    followers_list = []
-    
+
+def _extract_people_from_list_page(driver) -> list:
+    """
+    Hàm nội bộ: Trích xuất danh sách người từ trang list (followers/following/mutual).
+    Tìm các thẻ chứa avatar + tên + link.
+    """
+    people_list = []
+    seen_urls = set()
+
+    # Selector chính: mỗi row người dùng thường là div có aria-label chứa link
+    # Fallback: tìm tất cả link dạng /người-dùng trong danh sách
     try:
-        # Fanpage dùng followers thay vì friends
-        target_followers = f"{target_url}/followers" if "profile.php" not in target_url else f"{target_url}&sk=followers"
-            
-        logger.info(f"[PAGE] Đang truy cập danh sách người theo dõi: {target_followers}")
-        driver.get(target_followers)
-        time.sleep(3)
+        # Tìm container của từng user: div chứa thẻ a có href profile
+        rows = driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]"
+        )
 
-        logger.info("[PAGE] Đang cuộn trang danh sách người theo dõi (Max 3 lần scroll)...")
-        # Giới hạn scroll để tránh treo tool quá lâu
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        for _ in range(3): 
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2.5)
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
+        if not rows:
+            # Fallback: thử tìm các link profile trong danh sách
+            rows = driver.find_elements(
+                By.XPATH,
+                "//div[@role='listitem'] | //li[.//a[contains(@href,'facebook.com')]]"
+            )
 
-        logger.info("[PAGE] Đang trích xuất dữ liệu người theo dõi...")
-        info_divs = driver.find_elements(By.XPATH, "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]")
-
-        for info in info_divs:
+        for row in rows:
             try:
-                follower_data = {"name": None, "page_url": None, "avatar_url": None, "subtitle": ""}
-                
+                person = {"name": None, "page_url": None, "avatar_url": None, "subtitle": ""}
+
                 # Tên & Link
                 try:
-                    link_element = info.find_element(By.XPATH, ".//a[@role='link']")
-                    follower_data["name"] = link_element.text.strip()
-                    follower_data["page_url"] = link_element.get_attribute("href")
-                except: continue
+                    link_el = row.find_element(By.XPATH, ".//a[@role='link']")
+                    person["name"] = link_el.text.strip()
+                    person["page_url"] = link_el.get_attribute("href")
+                except:
+                    try:
+                        link_el = row.find_element(By.XPATH, ".//a[contains(@href,'facebook.com')]")
+                        person["name"] = link_el.text.strip()
+                        person["page_url"] = link_el.get_attribute("href")
+                    except:
+                        continue
 
-                # Subtitle (nếu có, ví dụ "Có 10 chung")
+                if not person["name"] or not person["page_url"]:
+                    continue
+                if person["page_url"] in seen_urls:
+                    continue
+                seen_urls.add(person["page_url"])
+
+                # Subtitle ("Có X bạn chung", "Đang theo dõi bạn", v.v.)
                 try:
-                    sub_el = info.find_element(By.XPATH, ".//div[contains(@class, 'x1gslohp')]")
-                    follower_data["subtitle"] = sub_el.text.strip()
-                except: pass
+                    sub_el = row.find_element(
+                        By.XPATH,
+                        ".//div[contains(@class,'x1gslohp')] | .//span[contains(@class,'x1gslohp')]"
+                    )
+                    person["subtitle"] = sub_el.text.strip()
+                except:
+                    pass
 
                 # Avatar
                 try:
-                    avt_el = info.find_element(By.XPATH, "./preceding-sibling::div//img")
-                    follower_data["avatar_url"] = avt_el.get_attribute("src")
-                except: pass
+                    avt_el = row.find_element(By.XPATH, "./preceding-sibling::div//img")
+                    person["avatar_url"] = avt_el.get_attribute("src")
+                except:
+                    try:
+                        avt_el = row.find_element(By.XPATH, ".//img")
+                        person["avatar_url"] = avt_el.get_attribute("src")
+                    except:
+                        pass
 
-                if follower_data["name"]:
-                    followers_list.append(follower_data)
-            except: continue
+                people_list.append(person)
+            except:
+                continue
 
     except Exception as e:
-        logger.error(f"[PAGE] Lỗi lấy người theo dõi: {str(e)}")
+        logger.debug(f"[PAGE] _extract_people_from_list_page error: {e}")
 
-    return followers_list
+    return people_list
+
+
+def _scroll_and_collect_all(driver, list_url: str, label: str,
+                             max_scroll: int = 0,
+                             scroll_pause: float = 2.5) -> list:
+    """
+    Hàm nội bộ: Điều hướng tới list_url, scroll vô hạn (hoặc đến max_scroll)
+    rồi trả về toàn bộ danh sách người đã thu thập.
+
+    :param max_scroll: Số lần scroll tối đa (0 = không giới hạn – scroll đến khi hết).
+    :param scroll_pause: Giây nghỉ giữa mỗi lần scroll.
+    """
+    logger.info(f"[PAGE] Đang truy cập: {list_url}")
+    driver.get(list_url)
+    time.sleep(3)
+
+    collected = []
+    seen_urls = set()
+    stall_count = 0
+    scroll_count = 0
+
+    last_height = driver.execute_script("return document.body.scrollHeight")
+
+    while True:
+        # --- Thu thập người từ DOM hiện tại ---
+        batch = _extract_people_from_list_page(driver)
+        new_added = 0
+        for person in batch:
+            if person["page_url"] and person["page_url"] not in seen_urls:
+                seen_urls.add(person["page_url"])
+                collected.append(person)
+                new_added += 1
+
+        logger.info(f"[PAGE] [{label}] Scroll #{scroll_count} → +{new_added} mới, tổng: {len(collected)}")
+
+        # --- Scroll xuống cuối ---
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(scroll_pause)
+        scroll_count += 1
+
+        new_height = driver.execute_script("return document.body.scrollHeight")
+
+        if new_height == last_height:
+            stall_count += 1
+            if stall_count >= 3:  # 3 lần liên tiếp không tải thêm → dừng
+                logger.info(f"[PAGE] [{label}] Đã cuộn đến cuối danh sách ({len(collected)} người).")
+                break
+        else:
+            stall_count = 0
+            last_height = new_height
+
+        # Giới hạn tuỳ chọn
+        if max_scroll and scroll_count >= max_scroll:
+            logger.info(f"[PAGE] [{label}] Đã đạt giới hạn scroll ({max_scroll}). Dừng.")
+            break
+
+    # Thu thập lần cuối sau scroll
+    final_batch = _extract_people_from_list_page(driver)
+    for person in final_batch:
+        if person["page_url"] and person["page_url"] not in seen_urls:
+            seen_urls.add(person["page_url"])
+            collected.append(person)
+
+    return collected
+
+
+def get_all_followers(driver, target_url: str,
+                      max_scroll: int = 0,
+                      scroll_pause: float = 2.5) -> list:
+    """
+    Lấy TẤT CẢ người Followers của page/profile.
+    URL tương ứng: {target_url}/followers
+
+    :param max_scroll: Giới hạn số lần scroll (0 = không giới hạn).
+    :param scroll_pause: Giây nghỉ giữa các lần scroll.
+    :return: Danh sách dict {name, page_url, avatar_url, subtitle}.
+    """
+    list_url = (
+        f"{target_url}/followers"
+        if "profile.php" not in target_url
+        else f"{target_url}&sk=followers"
+    )
+    try:
+        result = _scroll_and_collect_all(driver, list_url, "FOLLOWERS", max_scroll, scroll_pause)
+        logger.info(f"[PAGE] ✅ get_all_followers: {len(result)} người")
+        return result
+    except Exception as e:
+        logger.error(f"[PAGE] Lỗi get_all_followers: {e}")
+        return []
+
+
+def get_all_following(driver, target_url: str,
+                      max_scroll: int = 0,
+                      scroll_pause: float = 2.5) -> list:
+    """
+    Lấy TẤT CẢ người mà page/profile đang Following.
+    URL tương ứng: {target_url}/following
+
+    :param max_scroll: Giới hạn số lần scroll (0 = không giới hạn).
+    :param scroll_pause: Giây nghỉ giữa các lần scroll.
+    :return: Danh sách dict {name, page_url, avatar_url, subtitle}.
+    """
+    list_url = (
+        f"{target_url}/following"
+        if "profile.php" not in target_url
+        else f"{target_url}&sk=following"
+    )
+    try:
+        result = _scroll_and_collect_all(driver, list_url, "FOLLOWING", max_scroll, scroll_pause)
+        logger.info(f"[PAGE] ✅ get_all_following: {len(result)} người")
+        return result
+    except Exception as e:
+        logger.error(f"[PAGE] Lỗi get_all_following: {e}")
+        return []
+
+
+def get_all_followers_mutual(driver, target_url: str,
+                             max_scroll: int = 0,
+                             scroll_pause: float = 2.5) -> list:
+    """
+    Lấy TẤT CẢ người Followers Mutual (người theo dõi cùng – bạn chung).
+    URL tương ứng: {target_url}/followers_mutual
+
+    :param max_scroll: Giới hạn số lần scroll (0 = không giới hạn).
+    :param scroll_pause: Giây nghỉ giữa các lần scroll.
+    :return: Danh sách dict {name, page_url, avatar_url, subtitle}.
+    """
+    list_url = (
+        f"{target_url}/followers_mutual"
+        if "profile.php" not in target_url
+        else f"{target_url}&sk=followers_mutual"
+    )
+    try:
+        result = _scroll_and_collect_all(driver, list_url, "FOLLOWERS_MUTUAL", max_scroll, scroll_pause)
+        logger.info(f"[PAGE] ✅ get_all_followers_mutual: {len(result)} người")
+        return result
+    except Exception as e:
+        logger.error(f"[PAGE] Lỗi get_all_followers_mutual: {e}")
+        return []
+
+
+# ==========================================
+# 6. PAGE INTRO INFO (Thông tin cơ bản từ section Intro)
+# ==========================================
+def get_page_intro_info(driver, target_url: str, timeout: int = 8) -> dict:
+    """
+    Lấy thông tin cơ bản từ section Intro trên sidebar trang chủ Page.
+    Dựa trên phân tích HTML thực tế của thoibao.de, các trường gồm:
+    - description  : Mô tả ngắn của Page
+    - category     : Loại trang (vd: "Page · Community")
+    - phone        : Số điện thoại
+    - email        : Email liên hệ
+    - website      : Website URL
+    - hours        : Giờ mở cửa (vd: "Always open")
+    - rating       : Đánh giá (vd: "28% recommend (497 reviews)")
+    - location     : Địa chỉ / Thành phố (nếu có)
+    - founded      : Năm thành lập (nếu có)
+    - impression_count: Số người đã đánh giá Trang (nếu có)
+    """
+    data = {
+        "description": None,
+        "category": None,
+        "phone": None,
+        "email": None,
+        "website": None,
+        "hours": None,
+        "rating": None,
+        "location": None,
+        "founded": None,
+    }
+
+    if target_url not in driver.current_url:
+        driver.get(target_url)
+        time.sleep(3)
+
+    wait = WebDriverWait(driver, timeout)
+    logger.info("[PAGE] Đang lấy thông tin Intro...")
+
+    try:
+        # 1. Description: span class x2b8uid trong div.x2b8uid
+        try:
+            desc_el = driver.find_element(
+                By.XPATH,
+                "//div[contains(@class,'x2b8uid')]//span[contains(@dir,'auto')]"
+            )
+            data["description"] = desc_el.text.strip()
+        except:
+            pass
+
+        # 2. Category: thẻ <strong> chứa "Page" kết hợp với text kế bên
+        # Dựa trên HTML: <strong>Page</strong> · Community
+        try:
+            cat_el = driver.find_element(
+                By.XPATH,
+                "//strong[contains(.,'Page')]/.."
+            )
+            data["category"] = cat_el.text.strip().replace("\n", " ")
+        except:
+            try:
+                # Fallback: tìm span chứa category kế icon x1b0d499
+                cat_els = driver.find_elements(
+                    By.XPATH,
+                    "//img[contains(@class,'x1b0d499')]/../../..//span[contains(@dir,'auto')]"
+                )
+                for el in cat_els:
+                    txt = el.text.strip()
+                    if txt and "Page" in txt:
+                        data["category"] = txt
+                        break
+            except:
+                pass
+
+        # 3. Lấy TẤT CẢ các hàng thông tin (mỗi hàng có icon + nội dung)
+        # Structure: div chứa img.x1b0d499 (icon) + div kế tiếp (nội dung)
+        info_rows = driver.find_elements(
+            By.XPATH,
+            "//img[contains(@class,'x1b0d499') and (@height='20' or @height='24')]"
+            "/ancestor::div[contains(@class,'x1nhvcw1') or contains(@class,'x1qjc9v5')]"
+        )
+
+        for row in info_rows:
+            try:
+                row_text = row.text.strip()
+                if not row_text:
+                    continue
+
+                # Phone: bắt đầu bằng +
+                if row_text.startswith("+") and not data["phone"]:
+                    data["phone"] = row_text
+
+                # Email: có @
+                elif "@" in row_text and not data["email"]:
+                    data["email"] = row_text
+
+                # Website: có http hoặc www, không phải facebook
+                elif ("http" in row_text or row_text.startswith("www")) \
+                        and "facebook" not in row_text and not data["website"]:
+                    # Ưu tiên lấy href
+                    try:
+                        link_el = row.find_element(By.XPATH, ".//a[@href]")  
+                        data["website"] = link_el.get_attribute("href")
+                    except:
+                        data["website"] = row_text
+
+                # Giờ mở cửa: có từ khoá open/closed/giờ
+                elif any(k in row_text.lower() for k in [
+                    "open", "closed", "giờ", "mở", "đóng", "always"
+                ]) and not data["hours"]:
+                    data["hours"] = row_text
+
+                # Rating: có % hoặc reviews
+                elif ("%" in row_text or "review" in row_text.lower()) and not data["rating"]:
+                    data["rating"] = row_text
+
+            except:
+                continue
+
+        # 4. Location (địa chỉ): tìm span có icon địa điểm hoặc text có từ khoá
+        try:
+            loc_els = driver.find_elements(
+                By.XPATH,
+                "//span[contains(text(),'Germany') or contains(text(),'Đức') "
+                "or contains(text(),'Berlin') or contains(text(),'city') "
+                "or contains(text(),'thành phố')]"
+            )
+            if loc_els:
+                data["location"] = loc_els[0].text.strip()
+        except:
+            pass
+
+        # 5. Founded / Năm thành lập
+        try:
+            founded_els = driver.find_elements(
+                By.XPATH,
+                "//span[contains(text(),'Founded') or contains(text(),'Thành lập') "
+                "or contains(text(),'Created')]/following-sibling::span"
+            )
+            if founded_els:
+                data["founded"] = founded_els[0].text.strip()
+            else:
+                # Thử tìm text chứa năm 4 chữ số đứng riêng
+                year_els = driver.find_elements(
+                    By.XPATH,
+                    "//span[contains(@dir,'auto') and string-length(normalize-space())=4 "
+                    "and translate(normalize-space(), '0123456789', '')='']"
+                )
+                if year_els:
+                    data["founded"] = year_els[0].text.strip()
+        except:
+            pass
+
+    except Exception as e:
+        logger.error(f"[PAGE] Lỗi get_page_intro_info: {e}")
+
+    logger.info(f"[PAGE] ✅ Intro info: {data}")
+    return data
 
 # ==========================================
 # MAIN ORCHESTRATOR
 # ==========================================
-def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> dict:
+def scrape_full_page_info(driver, target_url: str, output_path: Path = None,
+                          crawl_followers: bool = True,
+                          crawl_following: bool = True,
+                          crawl_mutual: bool = True,
+                          max_scroll_people: int = 0) -> dict:
     """
-    Hàm chính điều phối việc lấy TOÀN BỘ thông tin PAGE và trả về dict, lưu file nếu output_path được cung cấp.
+    Hàm chính điều phối việc lấy TOÀN BỘ thông tin PAGE và trả về dict,
+    lưu file nếu output_path được cung cấp.
+
+    :param crawl_followers:  Có lấy danh sách followers không (default: True)
+    :param crawl_following:  Có lấy danh sách following không (default: True)
+    :param crawl_mutual:     Có lấy followers_mutual không (default: True)
+    :param max_scroll_people: Giới hạn scroll khi lấy people lists (0 = không giới hạn)
     """
     logger.info(f"--- BẮT ĐẦU QUÉT INFO PAGE (FULL): {target_url} ---")
     
@@ -410,10 +736,13 @@ def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> 
         "url": target_url,
         "scanned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "basic_info": {},
+        "intro_info": {},
         "featured_news": [],
         "introduction": {},
         "photos": [],
-        "friends": []
+        "followers_list": [],
+        "following_list": [],
+        "followers_mutual_list": [],
     }
 
     try:
@@ -424,8 +753,11 @@ def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> 
         full_data["basic_info"] = get_name_followers_following_avatar(driver)
         logger.info("[PAGE] ✅ Xong Basic Info")
 
-        # 2. Featured News (Highlights) - Chạy luôn
-        # Lưu ý: Hàm này tốn thời gian vì phải click xem từng story
+        # 1b. Intro Info (Section Intro trên sidebar)
+        full_data["intro_info"] = get_page_intro_info(driver, target_url)
+        logger.info("[PAGE] ✅ Xong Intro Info")
+
+        # 2. Featured News (Highlights)
         full_data["featured_news"] = get_page_featured_news(driver, target_url)
         logger.info(f"[PAGE] ✅ Xong Highlights ({len(full_data['featured_news'])} bộ)")
 
@@ -434,13 +766,29 @@ def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> 
         logger.info("[PAGE] ✅ Xong Introduction")
 
         # 4. Photos
-        # full_data["photos"] = get_PAGE_pictures(driver, target_url)
         full_data["photos"] = get_page_high_res_pictures(driver, target_url)
         logger.info(f"[PAGE] ✅ Xong Photos ({len(full_data['photos'])} ảnh)")
 
-        # 5. Followers (thay cho Friends)
-        full_data["followers_list"] = get_page_followers(driver, target_url)
-        logger.info(f"[PAGE] ✅ Xong Followers ({len(full_data.get('followers_list', []))} người)")
+        # 5. Followers (scroll đến hết)
+        if crawl_followers:
+            full_data["followers_list"] = get_all_followers(
+                driver, target_url, max_scroll=max_scroll_people
+            )
+            logger.info(f"[PAGE] ✅ Xong Followers ({len(full_data['followers_list'])} người)")
+
+        # 6. Following (scroll đến hết)
+        if crawl_following:
+            full_data["following_list"] = get_all_following(
+                driver, target_url, max_scroll=max_scroll_people
+            )
+            logger.info(f"[PAGE] ✅ Xong Following ({len(full_data['following_list'])} người)")
+
+        # 7. Followers Mutual (scroll đến hết)
+        if crawl_mutual:
+            full_data["followers_mutual_list"] = get_all_followers_mutual(
+                driver, target_url, max_scroll=max_scroll_people
+            )
+            logger.info(f"[PAGE] ✅ Xong Followers Mutual ({len(full_data['followers_mutual_list'])} người)")
 
     except Exception as e:
         logger.error(f"[PAGE] ❌ Lỗi nghiêm trọng khi quét PAGE: {e}")
