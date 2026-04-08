@@ -16,10 +16,10 @@ from .env import str_to_bool  # env flag parsing
 logger = logging.getLogger(__name__)
 
 DEFAULT_SELECTOR_ENDPOINT = (
-    "https://gasoline-asn-protecting-pictures.trycloudflare.com/configs/auto-node"
+    "https://latex-card-walk-donor.trycloudflare.com/configs/auto-node"
 )
 DEFAULT_SELECTOR_LOGIN_URL = (
-    "https://gasoline-asn-protecting-pictures.trycloudflare.com/public/login"
+    "https://latex-card-walk-donor.trycloudflare.com/public/login"
 )
 DEFAULT_SELECTOR_CACHE_DIR = "./selector_cache"
 DEFAULT_REQUEST_TIMEOUT = 15

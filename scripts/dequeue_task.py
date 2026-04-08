@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 def run_curl(api_key: str) -> subprocess.CompletedProcess:
     url = (
-        "https://gasoline-asn-protecting-pictures.trycloudflare.com/"
+        "https://latex-card-walk-donor.trycloudflare.com/"
         "tasks/dequeue?social_type=facebook&version=1.0"
     )
     cmd = [
