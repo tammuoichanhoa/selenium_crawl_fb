@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Tuple  # type hints
 
 import requests  # HTTP requests to selector service
 
-from .env import str_to_bool  # env flag parsing
+from .env import build_service_url, str_to_bool  # env flag parsing
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,15 @@ def resolve_selector_payload(
     if not site or not environment:
         return local_selector, "local" if local_selector else "none"
 
-    selected_endpoint = (endpoint or env.get("SELECTOR_ENDPOINT") or DEFAULT_SELECTOR_ENDPOINT).strip()
+    selected_endpoint = (
+        endpoint
+        or build_service_url(
+            env,
+            path="/configs/auto-node",
+            explicit_key="SELECTOR_ENDPOINT",
+            fallback=DEFAULT_SELECTOR_ENDPOINT,
+        )
+    ).strip()
     selected_cache_dir = (cache_dir or env.get("SELECTOR_CACHE_DIR") or DEFAULT_SELECTOR_CACHE_DIR).strip()
 
     payload, source = download_selector_with_cache(
@@ -172,7 +180,12 @@ def login_before_download(env: Dict[str, str], timeout: int) -> Dict[str, str] |
     Login to BE before downloading selector JSON.
     Returns auth headers or None if login fails.
     """
-    login_url = env.get("SELECTOR_LOGIN_URL", DEFAULT_SELECTOR_LOGIN_URL).strip()
+    login_url = build_service_url(
+        env,
+        path="/public/login",
+        explicit_key="SELECTOR_LOGIN_URL",
+        fallback=DEFAULT_SELECTOR_LOGIN_URL,
+    ).strip()
     username = env.get("SELECTOR_USERNAME", DEFAULT_SELECTOR_USERNAME)
     password = env.get("SELECTOR_PASSWORD", DEFAULT_SELECTOR_PASSWORD)
 

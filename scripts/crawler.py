@@ -12,11 +12,11 @@ from typing import Any, Dict, List, Tuple
 import datetime
 from pathlib import Path
 import traceback
+from selenium.webdriver.common.by import By
 
 from src.fbprofile.storage.paths import compute_paths
 from src.fbprofile.browser.hooks import install_early_hook
 from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
-# from src.fbprofile.browser.get_page_info import scrape_full_page_info
 from src.fbprofile.browser.navigation import go_to_date
 from src.fbprofile.browser.scroll import crawl_scroll_loop
 from src.fbprofile.storage.checkpoint import save_checkpoint
@@ -78,9 +78,14 @@ def _has_add_friend_button(driver) -> bool:
     return False
 
 
+def _detect_entity_type_from_dom(driver) -> str:
+    return "profile" if _has_add_friend_button(driver) else "page"
+
+
 def crawl_page(
     driver,
     url: str,
+    resolved_entity_type: str | None,
     elements_cfg: List[Dict[str, Any]],
     elements_cfg_profile: List[Dict[str, Any]] | None,
     elements_cfg_page: List[Dict[str, Any]] | None,
@@ -101,22 +106,31 @@ def crawl_page(
     active_elements_cfg = elements_cfg
     active_default_wait_cfg = default_wait_cfg
     active_selector_debug_cfg = selector_debug_cfg
+    active_entity_type = resolved_entity_type
+    if (
+        active_entity_type not in {"profile", "page"}
+        and elements_cfg_profile is not None
+        and elements_cfg_page is not None
+    ):
+        active_entity_type = _detect_entity_type_from_dom(driver)
+        logger.info(
+            "[crawl] Resolved entity type by DOM fallback: %s",
+            active_entity_type,
+        )
+
     if elements_cfg_profile is not None and elements_cfg_page is not None:
-        is_profile = _has_add_friend_button(driver)
-        if is_profile:
+        if active_entity_type == "profile":
             active_elements_cfg = elements_cfg_profile
             active_default_wait_cfg = default_wait_cfg_profile or default_wait_cfg
             active_selector_debug_cfg = selector_debug_cfg_profile or selector_debug_cfg
-        else:
+        elif active_entity_type == "page":
             active_elements_cfg = elements_cfg_page
             active_default_wait_cfg = default_wait_cfg_page or default_wait_cfg
             active_selector_debug_cfg = selector_debug_cfg_page or selector_debug_cfg
-        logger.info(
-            "[crawl] Detected %s by add-friend button",
-            "profile" if is_profile else "page",
-        )
+        if active_entity_type in {"profile", "page"}:
+            logger.info("[crawl] Using %s selectors", active_entity_type)
 
-    data: Dict[str, Any] = {"url": url}
+    data: Dict[str, Any] = {"url": url, "resolved_entity_type": active_entity_type}
     for element_cfg in active_elements_cfg:
         name = element_cfg.get("name") or element_cfg.get("selector")
         try:
@@ -176,10 +190,11 @@ Nếu lỗi thì ghi error.
 Giữa các trang, đợi wait_between_pages.
 Đóng driver, trả lại port về queue.
 '''
-def crawl_pages_batch(
+def crawl_urls_batch(
     worker_id: int,
-    indexed_pages: List[Tuple[int, str]],
+    indexed_urls: List[Tuple[int, Tuple[str, str | None]]],
     *,
+    selector_module: str | None,
     login_method: str,
     cookies_raw: str,
     user_agents: List[str],
@@ -206,11 +221,12 @@ def crawl_pages_batch(
     selector_debug_cfg: Dict[str, Any] | None,
     selector_debug_cfg_profile: Dict[str, Any] | None,
     selector_debug_cfg_page: Dict[str, Any] | None,
+    scroll_until_stable_cfg: Dict[str, Any] | None = None,
     profile_backup_name: str | None = None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
     logger.info(
-        f"[worker {worker_id}] Starting with {len(indexed_pages)} page(s) "
+        f"[worker {worker_id}] Starting with {len(indexed_urls)} url(s) "
         f"using {profile_label}"
     )
     if login_stagger_seconds > 0 and worker_id > 1:
@@ -253,33 +269,80 @@ def crawl_pages_batch(
             logger.error("[worker %s] Login failed: %s", worker_id, exc)
             return [
                 (index, {"url": url, "error": f"login_failed: {exc}"})
-                for index, url in indexed_pages
+                for index, (url, _) in indexed_urls
             ]
 
         results: List[Tuple[int, Dict[str, Any]]] = []
-        for position, (index, uid_or_url) in enumerate(indexed_pages):
+        for position, (index, crawl_target) in enumerate(indexed_urls):
+            uid_or_url, requested_entity_type = crawl_target
             url = uid_or_url
             if not str(url).startswith("http"):
                 url = f"https://www.facebook.com/{url}"
-
             try:
-                page_name = str(url).split('/')[-1].split('?')[0]
-                if not page_name: page_name = str(url)
+                url_name = str(url).split('/')[-1].split('?')[0]
+                if not url_name: url_name = str(url)
                 
                 data_root = str(Path(PROJECT_ROOT) / "database")
                 database_path, out_ndjson, raw_dumps_dir, checkpoint = compute_paths(
-                    Path(data_root).resolve(), page_name, ""
+                    Path(data_root).resolve(), url_name, ""
                 )
                 profile_info_path = database_path / "profile_info.json"
+                page_info_path = database_path / "page_info.json"
+                resolved_entity_type = requested_entity_type or selector_module
+                logger.info(
+                    "[worker %s] Resolved entity type for %s: %s",
+                    worker_id,
+                    url,
+                    resolved_entity_type or "unknown",
+                )
 
                 install_early_hook(driver, keep_last=350)
-                if selector_module == "profile":
-                    scrape_full_profile_info(driver, url, profile_info_path)
+                if (
+                    resolved_entity_type not in {"profile", "page"}
+                    and elements_cfg_profile is not None
+                    and elements_cfg_page is not None
+                ):
+                    driver.get(url)
+                    wait_for_page_ready(driver, 20)
+                    wait_for_seconds(driver, wait_after_load)
+                    resolved_entity_type = _detect_entity_type_from_dom(driver)
+                    logger.info(
+                        "[worker %s] DOM fallback resolved %s as %s",
+                        worker_id,
+                        url,
+                        resolved_entity_type,
+                    )
+
+                if resolved_entity_type == "profile":
+                    profile_data = scrape_full_profile_info(
+                        driver,
+                        url,
+                        profile_info_path,
+                        scroll_until_stable_cfg=scroll_until_stable_cfg,
+                    )
+                elif resolved_entity_type == "page":
+                    try:
+                        from src.fbprofile.browser.get_page_info import scrape_full_page_info
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "Missing page scraper: src.fbprofile.browser.get_page_info"
+                        ) from exc
+                    page_data = scrape_full_page_info(
+                        driver,
+                        url,
+                        page_info_path,
+                        scroll_until_stable_cfg=scroll_until_stable_cfg,
+                    )
                 else:
-                    scrape_full_page_info(driver, url, profile_info_path)
+                    logger.info(
+                        "[worker %s] Skipping specialized profile/page scraper for %s",
+                        worker_id,
+                        url,
+                    )
                 page_data = crawl_page(
                     driver,
                     url,
+                    resolved_entity_type,
                     elements_cfg,
                     elements_cfg_profile,
                     elements_cfg_page,
@@ -310,18 +373,19 @@ def crawl_pages_batch(
                     keep_last=350,
                     max_scrolls=10000,
                     ts_state=ts_state,
+                    scroll_until_stable_cfg=scroll_until_stable_cfg,
                 )
 
                 if ts_state["latest"] is not None:
                     save_checkpoint(checkpoint, ts_state["latest"])
 
-                profile_data = {}
-                if profile_info_path.exists():
-                    try:
-                        import json
-                        with open(profile_info_path, "r", encoding="utf-8") as f:
-                            profile_data = json.load(f)
-                    except: pass
+                # profile_data = {}
+                # if profile_info_path.exists():
+                #     try:
+                #         import json
+                #         with open(profile_info_path, "r", encoding="utf-8") as f:
+                #             profile_data = json.load(f)
+                #     except: pass
                 
                 posts_data = []
                 if out_ndjson.exists():
@@ -345,7 +409,7 @@ def crawl_pages_batch(
 
             results.append((index, page_data))
 
-            is_last_page = position == len(indexed_pages) - 1
+            is_last_page = position == len(indexed_urls) - 1
             if not is_last_page:
                 wait_for_seconds(driver, wait_between_pages)
         return results
@@ -426,6 +490,11 @@ def main() -> None:
     wait_between_pages = int(crawl_cfg.get("wait_between_pages", 0))
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
+    scroll_until_stable_cfg = (
+        crawl_cfg.get("scroll_until_stable")
+        if isinstance(crawl_cfg.get("scroll_until_stable"), dict)
+        else None
+    )
     output_file = crawl_cfg.get("output_file", "crawl_results.json")
     default_wait_cfg: Dict[str, Any] | None = None
     selector_payload = None
@@ -592,9 +661,10 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                crawl_pages_batch,
+                crawl_urls_batch,
                 worker_id,
                 batch,
+                selector_module=selector_module,
                 login_method=login_method,
                 cookies_raw=cookies_raw,
                 user_agents=user_agents,
@@ -621,6 +691,7 @@ def main() -> None:
                 selector_debug_cfg=selector_debug_cfg,
                 selector_debug_cfg_profile=None,
                 selector_debug_cfg_page=None,
+                scroll_until_stable_cfg=scroll_until_stable_cfg,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]

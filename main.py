@@ -14,10 +14,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.crawler import crawl_pages_batch, _normalize_selector_modules
+from scripts.crawler import crawl_urls_batch, _normalize_selector_modules
 from scripts.dequeue_task import run_curl
 from src.utils import (
     build_port_queue,
+    build_service_url,
     guard_fragile_locators,
     DEFAULT_CONFIG_PATH,
     load_config,
@@ -28,14 +29,13 @@ from src.utils import (
     resolve_selector_payload,
     select_working_proxy,
     setup_logging,
-    split_pages_for_workers,
+    split_urls_for_workers,
     str_to_bool,
     validate_selector_payload,
 )
 from src.utils.task_flow import (
     build_selector_config,
-    _build_selector_config,
-    collect_uids,
+    # _build_selector_config,
     extract_account_cookie,
     extract_account_uid,
     extract_items,
@@ -50,12 +50,12 @@ from src.utils.task_flow import (
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_EVENTS_URL = "https://latex-card-walk-donor.trycloudflare.com/events"
+DEFAULT_EVENTS_URL = "https://anticipated-andrea-search-laser.trycloudflare.com/events"
 # DEFAULT_ACCOUNT_COOKIES_FILE = "V1CM69c1f0b094cbc.txt"
 
 
 def _crawl_from_uids(
-    uids: List[str],
+    items: List[Dict[str, Any]],
     *,
     config: Dict[str, Any],
     selector_module: str | None,
@@ -98,8 +98,20 @@ def _crawl_from_uids(
     wait_between_pages = int(crawl_cfg.get("wait_between_pages", 0))
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
+    scroll_until_stable_cfg = (
+        crawl_cfg.get("scroll_until_stable")
+        if isinstance(crawl_cfg.get("scroll_until_stable"), dict)
+        else None
+    )
 
-    elements_cfg, default_wait_cfg, selector_debug_cfg = _build_selector_config(
+    crawl_targets: List[Tuple[str, str | None]] = []
+    for item in items:
+        uid = item.get("uid")
+        if not isinstance(uid, str) or not uid.strip():
+            raise ValueError("No valid uid values found in dequeue items.")
+        crawl_targets.append((uid.strip(), item.get("selector_module")))
+
+    elements_cfg, default_wait_cfg, selector_debug_cfg = build_selector_config(
         config,
         crawl_cfg,
         env,
@@ -134,15 +146,15 @@ def _crawl_from_uids(
     configured_max_workers = (
         max_workers_override
         if max_workers_override is not None
-        else env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(uids))
+        else env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(crawl_targets))
     )
     max_workers = resolve_max_workers(
         configured_max_workers,
-        len(uids),
+        len(crawl_targets),
         login_method,
         len(profile_dirs),
     )
-    page_batches = split_pages_for_workers(uids, max_workers)
+    batches = split_urls_for_workers(crawl_targets, max_workers)
 
     port_min = int(env.get("PORT_RANGE_MIN") or login_cfg.get("port_min") or 8000)
     port_max = int(env.get("PORT_RANGE_MAX") or login_cfg.get("port_max") or 9999)
@@ -158,9 +170,10 @@ def _crawl_from_uids(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                crawl_pages_batch,
+                crawl_urls_batch,
                 worker_id,
                 batch,
+                selector_module=selector_module,
                 login_method=login_method,
                 cookies_raw=cookies_raw,
                 user_agents=user_agents,
@@ -187,16 +200,17 @@ def _crawl_from_uids(
                 selector_debug_cfg=selector_debug_cfg,
                 selector_debug_cfg_profile=selector_debug_cfg_profile,
                 selector_debug_cfg_page=selector_debug_cfg_page,
+                scroll_until_stable_cfg=scroll_until_stable_cfg,
                 profile_backup_name=profile_backup_name if worker_id == 1 else None,
             )
-            for worker_id, batch in enumerate(page_batches, start=1)
+            for worker_id, batch in enumerate(batches, start=1)
         ]
 
         for future in as_completed(futures):
             for index, page_data in future.result():
                 indexed_results[index] = page_data
 
-    return [indexed_results[index] for index in range(len(uids))]
+    return [indexed_results[index] for index in range(len(crawl_targets))]
 
 
 def main() -> int:
@@ -239,6 +253,13 @@ def main() -> int:
     env = load_env_file(".env")
     if not args.api_key:
         args.api_key = env.get("API_KEY")
+    if args.events_url == DEFAULT_EVENTS_URL:
+        args.events_url = build_service_url(
+            env,
+            path="/events",
+            explicit_key="EVENTS_URL",
+            fallback=DEFAULT_EVENTS_URL,
+        )
 
     if args.test_uid:
         logger.info("[TEST MODE] Skipping API queue, using static test UID: %s", args.test_uid)
@@ -259,8 +280,9 @@ def main() -> int:
             return result.returncode
 
         payload = parse_dequeue_payload(result.stdout or "")
-        print("payload>>>>>>>>>", payload)
+        # print("payload>>>>>>>>>", payload)
         items = extract_items(payload)
+        print("Items from payload: ", items)
 
     if not items:
         logger.info("Queue is empty or contains no valid tasks. Exiting safely.")
@@ -352,23 +374,22 @@ def main() -> int:
             if not valid_items:
                 continue
 
-            uids = collect_uids(valid_items)
             results = _crawl_from_uids(
-                uids,
+                valid_items,
                 config=config,
                 selector_module=module or inferred_module,
                 max_workers_override=args.max_workers,
                 cookies_override=group.get("cookies"),
                 profile_backup_name=group.get("account_uid"),
             )
-            for item, page_result in zip(valid_items, results):
+            for item, result in zip(valid_items, results):
                 indexed_results[item["_index"]] = {
                     "task_id": item.get("task_id"),
                     "uid": item.get("uid"),
                     "social_type": item.get("social_type"),
                     "crawl_types": item.get("crawl_types"),
                     "selector_module": item.get("selector_module"),
-                    "result": page_result,
+                    "result": result,
                 }
 
     for index in range(len(items)):

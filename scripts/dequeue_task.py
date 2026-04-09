@@ -6,10 +6,55 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+DEFAULT_DEQUEUE_URL = (
+    "https://latex-card-walk-donor.trycloudflare.com/"
+    "tasks/dequeue?social_type=facebook&version=1.0"
+)
+
+
+def _load_env_value(key: str, default: str = "") -> str:
+    env_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".env",
+    )
+    if not os.path.exists(env_path):
+        return default
+
+    with open(env_path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            current_key, value = line.split("=", 1)
+            if current_key.strip() == key:
+                return value.strip().strip('"').strip("'")
+    return default
+
+
+def _build_service_url(
+    *,
+    path: str,
+    root_key: str = "SERVICE_ROOT_URL",
+    explicit_key: str | None = None,
+    fallback: str = "",
+) -> str:
+    if explicit_key:
+        explicit_value = _load_env_value(explicit_key, "").strip()
+        if explicit_value:
+            return explicit_value
+
+    root_value = _load_env_value(root_key, "").strip().rstrip("/")
+    if root_value:
+        return f"{root_value}/{path.lstrip('/')}"
+
+    return fallback
+
+
 def run_curl(api_key: str) -> subprocess.CompletedProcess:
-    url = (
-        "https://latex-card-walk-donor.trycloudflare.com/"
-        "tasks/dequeue?social_type=facebook&version=1.0"
+    url = _build_service_url(
+        path="/tasks/dequeue?social_type=facebook&version=1.0",
+        explicit_key="DEQUEUE_URL",
+        fallback=DEFAULT_DEQUEUE_URL,
     )
     cmd = [
         "curl",
