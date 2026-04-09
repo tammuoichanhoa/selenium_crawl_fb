@@ -1,10 +1,10 @@
-# post/v3/browser/navigation.py
 from datetime import date
 import time
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
 
 
 def wait_for(driver, timeout: int = 20) -> WebDriverWait:
@@ -20,7 +20,7 @@ def open_filter_dialog(driver):
         EC.element_to_be_clickable(
             (
                 By.XPATH,
-                "//span[normalize-space()='Bộ lọc' or normalize-space()='Filters']"
+                "//span[normalize-space()='Bộ lọc']"
                 "/ancestor::div[@role='none' or @role='button'][1]",
             )
         )
@@ -29,8 +29,8 @@ def open_filter_dialog(driver):
 
 
 def _select_enddate_combo_option(driver, part: str, option_text: str):
-    if part not in ("year", "month", "day"):
-        raise ValueError("part phải là 'year' / 'month' / 'day'")
+    if part not in ("năm", "tháng", "ngày"):
+        raise ValueError("part phải là 'năm' / 'tháng' / 'ngày'")
 
     w = wait_for(driver)
     label_contains = f"kết thúc {part}"
@@ -52,17 +52,17 @@ def go_to_date(driver, target: date):
     open_filter_dialog(driver)
 
     # Năm
-    _select_enddate_combo_option(driver, "year", str(target.year))
+    _select_enddate_combo_option(driver, "năm", str(target.year))
 
     # Tháng
     month_text = f"Tháng {target.month}"
     try:
-        _select_enddate_combo_option(driver, "month", month_text)
+        _select_enddate_combo_option(driver, "tháng", month_text)
     except Exception:
-        _select_enddate_combo_option(driver, "month", str(target.month))
+        _select_enddate_combo_option(driver, "tháng", str(target.month))
 
     # Ngày
-    _select_enddate_combo_option(driver, "day", str(target.day))
+    _select_enddate_combo_option(driver, "ngày", str(target.day))
 
     # Xong
     done_btn = w.until(

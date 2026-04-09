@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple  # type hints
 from urllib.parse import urlparse  # parse URLs for logging/host extraction
 
 from selenium import webdriver  # Selenium driver classes
+from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options  # Chrome option builder
 from src.utils.cookies import parse_cookie_string  # cookie header parsing
 from src.utils.waits import wait_for_page_ready, wait_for_seconds  # explicit wait helpers

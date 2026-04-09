@@ -19,7 +19,7 @@ from src.core.selector_remote import login_before_download
 
 
 DEFAULT_PUT_ENDPOINT = (
-    "https://gasoline-asn-protecting-pictures.trycloudflare.com/configs/auto-node"
+    "https://latex-card-walk-donor.trycloudflare.com/configs/auto-node"
 )
 logger = logging.getLogger(__name__)
 

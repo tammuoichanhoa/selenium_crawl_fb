@@ -1,6 +1,7 @@
 import time
 import json
 from pathlib import Path
+from typing import Any, Dict
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -8,6 +9,20 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 
 # Import logger từ hệ thống log hiện tại
 from logs.loging_config import logger
+from .stable_scroll import scroll_until_stable
+
+
+def _count_unique_xpath_values(driver, xpath: str, attr: str = "href") -> int:
+    values = set()
+    for element in driver.find_elements(By.XPATH, xpath):
+        try:
+            value = element.get_attribute(attr) if attr else element.text
+        except Exception:
+            continue
+        value = value.strip() if isinstance(value, str) else value
+        if value:
+            values.add(value)
+    return len(values)
 
 # ==========================================
 # 1. BASIC INFO (Tên, Avatar, Follower)
@@ -339,7 +354,12 @@ def get_page_pictures(driver, target_url, timeout: int = 20) -> list:
 # ==========================================
 # 5. FRIENDS (Bạn bè)
 # ==========================================
-def get_page_followers(driver, target_url, timeout: int = 5) -> list:
+def get_page_followers(
+    driver,
+    target_url,
+    timeout: int = 5,
+    scroll_until_stable_cfg: Dict[str, Any] | None = None,
+) -> list:
     """Lấy danh sách Người theo dõi (Followers) trên Fanpage (có cuộn trang)."""
     followers_list = []
     
@@ -351,16 +371,23 @@ def get_page_followers(driver, target_url, timeout: int = 5) -> list:
         driver.get(target_followers)
         time.sleep(3)
 
-        logger.info("[PAGE] Đang cuộn trang danh sách người theo dõi (Max 3 lần scroll)...")
-        # Giới hạn scroll để tránh treo tool quá lâu
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        for _ in range(3): 
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2.5)
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
+        logger.info("[PAGE] Đang cuộn danh sách người theo dõi đến khi ổn định...")
+        scroll_until_stable(
+            driver,
+            get_progress_count=lambda: _count_unique_xpath_values(
+                driver,
+                "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]//a[@role='link']",
+                attr="href",
+            ),
+            log_prefix="[PAGE][FOLLOWERS]",
+            config=scroll_until_stable_cfg,
+            defaults={
+                "max_scrolls": 50,
+                "stable_rounds": 3,
+                "scroll_pause_seconds": 2.0,
+                "settle_pause_seconds": 0.5,
+            },
+        )
 
         logger.info("[PAGE] Đang trích xuất dữ liệu người theo dõi...")
         info_divs = driver.find_elements(By.XPATH, "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]")
@@ -400,12 +427,17 @@ def get_page_followers(driver, target_url, timeout: int = 5) -> list:
 # ==========================================
 # MAIN ORCHESTRATOR
 # ==========================================
-def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> dict:
+def scrape_full_page_info(
+    driver,
+    target_url: str,
+    output_path: Path = None,
+    scroll_until_stable_cfg: Dict[str, Any] | None = None,
+) -> dict:
     """
     Hàm chính điều phối việc lấy TOÀN BỘ thông tin PAGE và trả về dict, lưu file nếu output_path được cung cấp.
     """
     logger.info(f"--- BẮT ĐẦU QUÉT INFO PAGE (FULL): {target_url} ---")
-    
+
     full_data = {
         "url": target_url,
         "scanned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -413,49 +445,58 @@ def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> 
         "featured_news": [],
         "introduction": {},
         "photos": [],
-        "friends": []
+        "friends": [],
     }
 
     try:
-        # 1. Basic Info (Trang chủ)
         if target_url not in driver.current_url:
             driver.get(target_url)
             time.sleep(3)
+
         full_data["basic_info"] = get_name_followers_following_avatar(driver)
         logger.info("[PAGE] ✅ Xong Basic Info")
 
-        # 2. Featured News (Highlights) - Chạy luôn
-        # Lưu ý: Hàm này tốn thời gian vì phải click xem từng story
         full_data["featured_news"] = get_page_featured_news(driver, target_url)
         logger.info(f"[PAGE] ✅ Xong Highlights ({len(full_data['featured_news'])} bộ)")
 
-        # 3. Introduction (About)
         full_data["introduction"] = get_page_introduces(driver, target_url)
         logger.info("[PAGE] ✅ Xong Introduction")
 
-        # 4. Photos
-        # full_data["photos"] = get_PAGE_pictures(driver, target_url)
-        full_data["photos"] = get_page_high_res_pictures(driver, target_url)
+        full_data["photos"] = get_page_high_res_pictures(
+            driver,
+            target_url,
+            scroll_until_stable_cfg=scroll_until_stable_cfg,
+        )
         logger.info(f"[PAGE] ✅ Xong Photos ({len(full_data['photos'])} ảnh)")
 
-        # 5. Followers (thay cho Friends)
-        full_data["followers_list"] = get_page_followers(driver, target_url)
+        full_data["followers_list"] = get_page_followers(
+            driver,
+            target_url,
+            scroll_until_stable_cfg=scroll_until_stable_cfg,
+        )
         logger.info(f"[PAGE] ✅ Xong Followers ({len(full_data.get('followers_list', []))} người)")
 
     except Exception as e:
         logger.error(f"[PAGE] ❌ Lỗi nghiêm trọng khi quét PAGE: {e}")
-    finally:
-        # Quan trọng: Dù thành công hay thất bại, lưu file lại nếu có output_path
-        if output_path:
-            try:
-                with open(output_path, "w", encoding="utf-8") as f:
-                    json.dump(full_data, f, ensure_ascii=False, indent=4)
-                logger.info(f"[PAGE] 💾 Đã lưu FULL info vào: {output_path}")
-            except Exception as save_err:
-                logger.error(f"[PAGE] Không thể lưu file: {save_err}")
-        
-        return full_data
-def get_page_high_res_pictures(driver, target_url, timeout=5, max_photos=None, batch_size=10):
+
+    if output_path:
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(full_data, f, ensure_ascii=False, indent=4)
+            logger.info(f"[PAGE] 💾 Đã lưu FULL info vào: {output_path}")
+        except Exception as save_err:
+            logger.error(f"[PAGE] Không thể lưu file: {save_err}")
+
+    return full_data
+
+def get_page_high_res_pictures(
+    driver,
+    target_url,
+    timeout=5,
+    max_photos=None,
+    batch_size=10,
+    scroll_until_stable_cfg: Dict[str, Any] | None = None,
+):
     """
     Lấy link ảnh High Res bằng cách mở nhiều tab cùng lúc (Batching).
     Đã fix lỗi trình duyệt không chịu tải ảnh ở các tab ngầm.
@@ -468,26 +509,23 @@ def get_page_high_res_pictures(driver, target_url, timeout=5, max_photos=None, b
     driver.get(photos_url)
     time.sleep(3)
 
-    # 1. Auto scroll để load TẤT CẢ ảnh
     logger.info("[PAGE] Đang cuộn trang để lấy toàn bộ ảnh...")
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    
-    while True:
-        # Cuộn xuống cuối trang
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        
-        # Đợi Facebook load thêm ảnh mới (có thể tăng lên 3s nếu mạng chậm)
-        time.sleep(2) 
-        
-        # Tính toán lại chiều cao trang sau khi cuộn
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        
-        # Nếu chiều cao không thay đổi tức là đã chạm đáy (hết ảnh)
-        if new_height == last_height:
-            logger.info("[PAGE] Đã cuộn đến cuối danh sách ảnh.")
-            break
-            
-        last_height = new_height
+    scroll_until_stable(
+        driver,
+        get_progress_count=lambda: _count_unique_xpath_values(
+            driver,
+            "//a[contains(@href,'photo.php')]",
+            attr="href",
+        ),
+        log_prefix="[PAGE][PHOTOS]",
+        config=scroll_until_stable_cfg,
+        defaults={
+            "max_scrolls": 80,
+            "stable_rounds": 3,
+            "scroll_pause_seconds": 2.0,
+            "settle_pause_seconds": 0.5,
+        },
+    )
 
     # 2. Lấy danh sách link photo.php
     photo_links = set()

@@ -13,7 +13,13 @@
     "element_timeout": 15,
     "output_file": "crawl_results.json",
     "user_agent_rotation": true,
-    "proxy_rotation": false
+    "proxy_rotation": false,
+    "scroll_until_stable": {
+      "max_scrolls": 80,
+      "stable_rounds": 4,
+      "scroll_pause_seconds": 2.0,
+      "settle_pause_seconds": 0.5
+    }
   },
   "selectors": {
     "modules_dir": "configs/modules"

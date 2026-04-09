@@ -42,7 +42,7 @@ from src.fbprofile.storage.checkpoint import save_checkpoint
 
 DEFAULT_CONFIG_PATH = "configs/config.json"
 logger = logging.getLogger(__name__)
-DEFAULT_EVENTS_URL = "https://gasoline-asn-protecting-pictures.trycloudflare.com/events"
+DEFAULT_EVENTS_URL = "https://latex-card-walk-donor.trycloudflare.com/events"
 
 
 def _parse_dequeue_payload(raw: str) -> Dict[str, Any]:

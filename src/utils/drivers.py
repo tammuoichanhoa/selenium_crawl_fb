@@ -13,6 +13,7 @@ from typing import Iterable, List, Optional, Tuple  # type hints
 from urllib.parse import urlparse  # parse URLs for logging/host extraction
 
 from selenium import webdriver  # Selenium driver classes
+from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options  # Chrome option builder
 from .cookies import parse_cookie_string  # cookie header parsing
 from .profile_backup import backup_profile_folder
@@ -244,6 +245,7 @@ def create_local_driver(
     user_agent: Optional[str] = None,
     window_size: Optional[Tuple[int, int]] = None,
     window_position: Optional[Tuple[int, int]] = None,
+    incognito: bool = False,
 ) -> webdriver.Chrome:
     """Khởi tạo Chrome Driver bằng cách gọi process thật và attach Selenium qua cổng Debug."""
 
@@ -270,6 +272,9 @@ def create_local_driver(
     if headless:
         cmd.append("--headless=new")
         cmd.append("--disable-gpu")
+
+    if incognito:
+        cmd.append("--incognito")
 
     if app_mode:
         cmd.append("--app=https://www.facebook.com")
@@ -431,6 +436,7 @@ def create_logged_in_driver(
         user_agent=user_agent,
         window_size=window_size,
         window_position=window_position,
+        incognito=(login_method in ("anonymous", "none", "no_login")),
     )
 
     try:
@@ -442,8 +448,12 @@ def create_logged_in_driver(
             )
         elif login_method == "profile":
             ok = verify_facebook_login_state(driver, home_url=home_url)
+        elif login_method in ("anonymous", "none", "no_login"):
+            # Chế độ ẩn danh: không đăng nhập, chỉ mở browser thạo rồi trả về driver luôn
+            logger.info("[DRIVER] Anonymous mode: bỏ qua login, không inject cookies.")
+            return driver
         else:
-            raise ValueError("LOGIN_METHOD must be either 'cookies' or 'profile'.")
+            raise ValueError("LOGIN_METHOD must be 'cookies', 'profile', or 'anonymous'.")
 
         if not ok:
             debug_state = get_facebook_login_debug_state(driver)
