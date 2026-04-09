@@ -58,12 +58,20 @@ def resolve_max_workers(
     return max_workers
 
 
-def split_pages_for_workers(
-    pages: List[str],
+def split_urls_for_workers(
+    items: List[Any],
     max_workers: int,
-) -> List[List[Tuple[int, str]]]:
-    """Split pages into round-robin batches for workers."""
-    batches: List[List[Tuple[int, str]]] = [[] for _ in range(max_workers)]
-    for index, url in enumerate(pages):
-        batches[index % max_workers].append((index, url))
+) -> List[List[Tuple[int, Any]]]:
+    """Split crawl inputs into round-robin batches for workers."""
+    batches: List[List[Tuple[int, Any]]] = [[] for _ in range(max_workers)]
+    for index, item in enumerate(items):
+        batches[index % max_workers].append((index, item))
     return [batch for batch in batches if batch]
+
+
+def split_pages_for_workers(
+    pages: List[Any],
+    max_workers: int,
+) -> List[List[Tuple[int, Any]]]:
+    """Backward-compatible alias for older callers."""
+    return split_urls_for_workers(pages, max_workers)

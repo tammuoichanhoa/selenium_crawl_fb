@@ -1,19 +1,19 @@
-# Facebook Selenium Crawler
+# Facebook Crawl Pipeline
 
 Dự án này là công cụ tự động cào dữ liệu Facebook (Profile, Page, Group...) bằng **Selenium**. Hệ thống được thiết kế để kết nối trực tiếp với API hàng đợi (Queue) để nhận nhiệm vụ, thực hiện thu thập thông tin chuyên sâu (Deep Crawl) song song đa luồng, và gửi kết quả về máy chủ.
 
 Công cụ hỗ trợ mạnh mẽ việc xoay vòng User-Agent, proxy, gỡ lỗi cổng, và sử dụng Cookies hoặc Chrome Profile để duy trì phiên đăng nhập.
 
----
+`main.py` là entrypoint nên dùng nếu bạn chạy theo queue hoặc muốn test nhanh một UID.
 
-## 🛠 Yêu Cầu Hệ Thống
+Chức năng chính:
 
 * **Hệ điều hành:** Khuyến nghị Linux, macOS hoặc Windows.
 * **Ngôn ngữ:** Python 3.10 trở lên.
 * **Trình duyệt:** Bắt buộc cài đặt [Google Chrome](https://www.google.com/chrome/).
 * **Driver:** Hệ thống có cơ chế tự tìm và tích hợp WebDriver phù hợp với bản Chrome hiện tại qua cơ chế nội bộ của Selenium Manager.
 
----
+Ví dụ:
 
 ## 🚀 Hướng Dẫn Cài Đặt (Setup)
 
@@ -68,7 +68,7 @@ Nếu bạn chỉ muốn kiểm thử 1 fanpage (ví dụ trang `cambongda`) mà
 python main.py --test-uid cambongda --selector-module page
 ```
 
----
+Trong [configs/base.json](/home/baoanh/Desktop/Workplace/selenium_crawl_fb/configs/base.json), crawler đang override thành:
 
 ## 🚩 Các Cờ Tham Số (Flags) cho `main.py`
 
@@ -81,7 +81,7 @@ python main.py --test-uid cambongda --selector-module page
 | `--events-url` | Chỉ định URL của hệ thống nhận/lắng nghe báo cáo tiến độ và tiếp nhận Database thu thập được. | `--events-url https://api/...` |
 | `--out` | Đường dẫn file lưu cứng lại JSON toàn bộ Output để kiểm thử độc lập ở Local. | `--out crawl_results.json` |
 
----
+## Ghi chú triển khai
 
 ## 🔄 Luồng Gọi API và Xử Lý Dữ Liệu (API Flow)
 

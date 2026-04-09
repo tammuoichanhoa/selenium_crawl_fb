@@ -234,14 +234,14 @@
     "profile.address": {
       "primary": {
         "type": "xpath",
-        "value": "//span[contains(@class,'x6s0dn4')]",
+        "value": "//h2[.//span[normalize-space()='Thông tin cá nhân']]/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[normalize-space()='Sống ở Hà Nội']",
         "priority": 6
       },
       "fallbacks": [
         {
-          "type": "css",
-          "value": "[data-action-id=\"32747\"]",
-          "priority": 1
+          "type": "xpath",
+          "value": "//span[normalize-space()='Thông tin cá nhân']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[contains(normalize-space(), 'Sống ở ')]",
+          "priority": 5
         }
       ],
       "wait": {
@@ -253,14 +253,14 @@
     "profile.company": {
       "primary": {
         "type": "xpath",
-        "value": "//span[contains(@class,'x6s0dn4')]",
+        "value": "//span[normalize-space()='Công việc']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[@id][1]//span[normalize-space()]",
         "priority": 6
       },
       "fallbacks": [
         {
-          "type": "css",
-          "value": "[data-action-id=\"32744\"]",
-          "priority": 1
+          "type": "xpath",
+          "value": "//span[normalize-space()='Công việc']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//div[@role='listitem']//span[normalize-space()='MBBank']",
+          "priority": 5
         }
       ],
       "wait": {
@@ -291,26 +291,9 @@
     "profile.gender": {
       "primary": {
         "type": "xpath",
-        "value": "//span[contains(@class,'x193iq5w')]",
-        "priority": 5
+        "value": "//span[normalize-space()='Thông tin cá nhân']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[normalize-space()='Nữ' or normalize-space()='Nam']",
+        "priority": 6
       },
-      "fallbacks": [
-        {
-          "type": "css",
-          "value": ".xkh2ocl > .x78zum5 > .xu06os2 > .x193iq5w",
-          "priority": 3
-        },
-        {
-          "type": "css",
-          "value": "#app-body",
-          "priority": 1
-        },
-        {
-          "type": "xpath",
-          "value": "//*[@id='app-body']",
-          "priority": 1
-        }
-      ],
       "wait": {
         "state": "presence",
         "timeout_ms": 10000
@@ -338,22 +321,10 @@
     },
     "profile.jobs": {
       "primary": {
-        "type": "css",
-        "value": ".x1n2onr6 .x1i10hfl",
+        "type": "xpath",
+        "value": "//span[normalize-space()='Công việc']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//div[@role='listitem']",
         "priority": 6
       },
-      "fallbacks": [
-        {
-          "type": "xpath",
-          "value": "//*[@role='button' and contains(@class,'x1i10hfl')]",
-          "priority": 4
-        },
-        {
-          "type": "xpath",
-          "value": "//div[contains(@class,'x1i10hfl')]",
-          "priority": 3
-        }
-      ],
       "multiple": true,
       "limit": 20,
       "wait": {
@@ -466,8 +437,8 @@
     "profile.about.tab": {
       "primary": {
         "type": "xpath",
-        "value": "//a[@role='tab']//span",
-        "priority": 4
+        "value": "//a[@role='tab']//span[contains(text(), '{keyword}')]",
+        "priority": 5
       },
       "attribute": "text"
     },
@@ -478,6 +449,22 @@
         "priority": 5
       },
       "multiple": true,
+      "attribute": "text"
+    },
+    "profile.about.details.header": {
+      "primary": {
+        "type": "xpath",
+        "value": ".//h2",
+        "priority": 5
+      },
+      "attribute": "text"
+    },
+    "profile.about.details.content": {
+      "primary": {
+        "type": "xpath",
+        "value": "./following-sibling::div[contains(@class, 'xat24cr')]",
+        "priority": 5
+      },
       "attribute": "text"
     },
     "profile.about.rows_primary": {

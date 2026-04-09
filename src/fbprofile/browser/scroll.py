@@ -7,6 +7,7 @@ from logs.loging_config import logger
 from ..browser.hooks import CLEANUP_JS, flush_gql_recs
 from ..graphql.extractors import _best_primary_key
 from ..pipeline import process_single_gql_rec  # sẽ tạo file này bên dưới
+from .stable_scroll import get_scroll_height, normalize_scroll_until_stable_cfg
 
 
 _SHOULD_STOP = False
@@ -17,6 +18,10 @@ def set_stop_flag():
     _SHOULD_STOP = True
 
 
+'''
+dùng tiêu chí stable đó thay cho ngưỡng stall hard-code cũ,
+và nhận cấu hình ngoài qua scroll_until_stable_cfg
+'''
 def crawl_scroll_loop(
     d,
     group_url: str,
@@ -25,31 +30,42 @@ def crawl_scroll_loop(
     keep_last: int,
     max_scrolls: int = 10000000000,
     ts_state: dict = None,
+    scroll_until_stable_cfg: Dict[str, Any] | None = None,
 ) -> bool:
     """
     Return:
         True  -> dừng vì stall (Stall confirmed ...)
         False -> dừng vì lý do khác (STOP flag, MAX_SCROLLS, error...)
     """
-    MAX_SCROLLS = max_scrolls
     CLEANUP_EVERY = 25
-    STALL_THRESHOLD = 8
-
     DOM_KEEP = max(30, min(keep_last or 40, 60))
+    resolved_scroll_cfg = normalize_scroll_until_stable_cfg(
+        scroll_until_stable_cfg,
+        defaults={
+            "max_scrolls": max_scrolls,
+            "stable_rounds": 8,
+            "scroll_pause_seconds": 1.0,
+            "settle_pause_seconds": 1.0,
+        },
+    )
+    max_scrolls = int(resolved_scroll_cfg["max_scrolls"])
+    stable_rounds_required = int(resolved_scroll_cfg["stable_rounds"])
+    scroll_pause_seconds = float(resolved_scroll_cfg["scroll_pause_seconds"])
+    settle_pause_seconds = float(resolved_scroll_cfg["settle_pause_seconds"])
 
-    prev_height = None
+    prev_height = get_scroll_height(d)
+    prev_seen_count = len(seen_ids)
     stall_count = 0
-    idle_rounds_no_new_posts = 0
     i = 0
-    stopped_due_to_stall = False  # NEW
+    stopped_due_to_stall = False
 
     while True:
         if _SHOULD_STOP:
             logger.info("[STOP] Received stop flag, breaking scroll loop.")
             break
 
-        if i >= MAX_SCROLLS:
-            logger.info("[STOP] Reach MAX_SCROLLS=%d, break loop.", MAX_SCROLLS)
+        if i >= max_scrolls:
+            logger.info("[STOP] Reach MAX_SCROLLS=%d, break loop.", max_scrolls)
             break
 
         try:
@@ -60,7 +76,8 @@ def crawl_scroll_loop(
             logger.warning("[SCROLL] execute_script error: %s", e)
             break
 
-        time.sleep(1.0)
+        if scroll_pause_seconds > 0:
+            time.sleep(scroll_pause_seconds)
 
         recs = flush_gql_recs(d)
         total_new_from_batch = 0
@@ -85,39 +102,46 @@ def crawl_scroll_loop(
                     len(seen_ids),
                 )
 
-        if total_new_from_batch == 0:
-            idle_rounds_no_new_posts += 1
-        else:
-            idle_rounds_no_new_posts = 0
-
         if i > 0 and (i % CLEANUP_EVERY == 0):
-            pass # Disable cleanup JS which breaks FB React Scroll
-
+            try:
+                d.execute_script(CLEANUP_JS, DOM_KEEP)
+            except Exception:
+                pass
 
         try:
-            cur_height = d.execute_script("return document.body.scrollHeight;")
+            cur_height = get_scroll_height(d)
         except Exception:
             break
 
-        if prev_height is None:
-            prev_height = cur_height
+        current_seen_count = len(seen_ids)
+        if cur_height <= prev_height and current_seen_count <= prev_seen_count:
+            stall_count += 1
         else:
-            if cur_height <= prev_height and total_new_from_batch == 0:
-                stall_count += 1
-            else:
-                stall_count = 0
-                prev_height = cur_height
+            stall_count = 0
 
-        if stall_count >= STALL_THRESHOLD and idle_rounds_no_new_posts >= 30:
+        prev_height = cur_height
+        prev_seen_count = current_seen_count
+
+        logger.info(
+            "[SCROLL] #%d height=%d total_seen=%d stable=%d/%d",
+            i,
+            cur_height,
+            current_seen_count,
+            stall_count,
+            stable_rounds_required,
+        )
+
+        if stall_count >= stable_rounds_required:
             logger.info(
-                "[STOP] Stall confirmed: no new posts for %d rounds & height stagnant.",
-                idle_rounds_no_new_posts,
+                "[STOP] Stable scroll detected: no new posts and height stagnant for %d rounds.",
+                stall_count,
             )
-            stopped_due_to_stall = True  # NEW
+            stopped_due_to_stall = True
             break
 
         i += 1
-        time.sleep(1)
+        if settle_pause_seconds > 0:
+            time.sleep(settle_pause_seconds)
 
     logger.info("[DONE] Crawl loop finished. Total unique posts seen: %d", len(seen_ids))
-    return stopped_due_to_stall  # NEW
+    return stopped_due_to_stall

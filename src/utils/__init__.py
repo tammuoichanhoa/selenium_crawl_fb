@@ -12,9 +12,14 @@ from .drivers import (
     terminate_chrome_process,
     verify_facebook_login_state,
 )
-from .env import load_env_file, str_to_bool
+from .env import build_service_url, load_env_file, str_to_bool
 from .logging_setup import setup_logging
-from .pages import read_pages, resolve_max_workers, split_pages_for_workers
+from .pages import (
+    read_pages,
+    resolve_max_workers,
+    split_pages_for_workers,
+    split_urls_for_workers,
+)
 from .ports import build_port_queue, is_port_free
 from .profile_backup import backup_profile_folder
 from .profiles import parse_profile_dirs, resolve_profile_dirs
@@ -49,6 +54,7 @@ __all__ = [
     "backup_profile_folder",
     "build_locator_chain",
     "build_port_queue",
+    "build_service_url",
     "create_local_driver",
     "create_logged_in_driver",
     "extract_element",
@@ -73,6 +79,7 @@ __all__ = [
     "resolve_wait_timeout_seconds",
     "select_working_proxy",
     "split_pages_for_workers",
+    "split_urls_for_workers",
     "str_to_bool",
     "setup_logging",
     "terminate_chrome_process",

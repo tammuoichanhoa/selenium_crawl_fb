@@ -509,7 +509,6 @@ def build_selector_config(
 
     return elements_cfg, default_wait_cfg, selector_debug_cfg
 
-
 __all__ = [
     "build_selector_config",
     "collect_uids",

@@ -34,3 +34,24 @@ def str_to_bool(value: str | bool | None, fallback: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return fallback
+
+
+def build_service_url(
+    env: Dict[str, str],
+    *,
+    path: str,
+    root_key: str = "SERVICE_ROOT_URL",
+    explicit_key: str | None = None,
+    fallback: str = "",
+) -> str:
+    """Resolve a service URL from an explicit env var or a shared root."""
+    if explicit_key:
+        explicit_value = (env.get(explicit_key) or os.environ.get(explicit_key) or "").strip()
+        if explicit_value:
+            return explicit_value
+
+    root_value = (env.get(root_key) or os.environ.get(root_key) or "").strip().rstrip("/")
+    if root_value:
+        return f"{root_value}/{path.lstrip('/')}"
+
+    return fallback

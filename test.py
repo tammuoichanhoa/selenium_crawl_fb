@@ -5,37 +5,31 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Dict, List
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.crawler import crawl_urls_batch, _normalize_selector_modules
+from scripts.crawler import crawl_pages_batch, _normalize_selector_modules
 from scripts.dequeue_task import run_curl
 from src.utils import (
     build_port_queue,
-    build_service_url,
-    guard_fragile_locators,
     DEFAULT_CONFIG_PATH,
     load_config,
     load_env_file,
-    normalize_elements_config,
     resolve_max_workers,
     resolve_profile_dirs,
-    resolve_selector_payload,
     select_working_proxy,
     setup_logging,
-    split_urls_for_workers,
+    split_pages_for_workers,
     str_to_bool,
-    validate_selector_payload,
 )
 from src.utils.task_flow import (
     build_selector_config,
-    # _build_selector_config,
+    collect_uids,
     extract_account_cookie,
     extract_account_uid,
     extract_items,
@@ -50,12 +44,12 @@ from src.utils.task_flow import (
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_EVENTS_URL = "https://anticipated-andrea-search-laser.trycloudflare.com/events"
+DEFAULT_EVENTS_URL = "https://gasoline-asn-protecting-pictures.trycloudflare.com/events"
 # DEFAULT_ACCOUNT_COOKIES_FILE = "V1CM69c1f0b094cbc.txt"
 
 
 def _crawl_from_uids(
-    items: List[Dict[str, Any]],
+    uids: List[str],
     *,
     config: Dict[str, Any],
     selector_module: str | None,
@@ -98,18 +92,6 @@ def _crawl_from_uids(
     wait_between_pages = int(crawl_cfg.get("wait_between_pages", 0))
     element_timeout = int(crawl_cfg.get("element_timeout", 15))
     login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
-    scroll_until_stable_cfg = (
-        crawl_cfg.get("scroll_until_stable")
-        if isinstance(crawl_cfg.get("scroll_until_stable"), dict)
-        else None
-    )
-
-    crawl_targets: List[Tuple[str, str | None]] = []
-    for item in items:
-        uid = item.get("uid")
-        if not isinstance(uid, str) or not uid.strip():
-            raise ValueError("No valid uid values found in dequeue items.")
-        crawl_targets.append((uid.strip(), item.get("selector_module")))
 
     elements_cfg, default_wait_cfg, selector_debug_cfg = build_selector_config(
         config,
@@ -146,15 +128,15 @@ def _crawl_from_uids(
     configured_max_workers = (
         max_workers_override
         if max_workers_override is not None
-        else env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(crawl_targets))
+        else env.get("MAX_WORKERS") or crawl_cfg.get("max_workers") or min(5, len(uids))
     )
     max_workers = resolve_max_workers(
         configured_max_workers,
-        len(crawl_targets),
+        len(uids),
         login_method,
         len(profile_dirs),
     )
-    batches = split_urls_for_workers(crawl_targets, max_workers)
+    page_batches = split_pages_for_workers(uids, max_workers)
 
     port_min = int(env.get("PORT_RANGE_MIN") or login_cfg.get("port_min") or 8000)
     port_max = int(env.get("PORT_RANGE_MAX") or login_cfg.get("port_max") or 9999)
@@ -170,10 +152,9 @@ def _crawl_from_uids(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                crawl_urls_batch,
+                crawl_pages_batch,
                 worker_id,
                 batch,
-                selector_module=selector_module,
                 login_method=login_method,
                 cookies_raw=cookies_raw,
                 user_agents=user_agents,
@@ -200,17 +181,16 @@ def _crawl_from_uids(
                 selector_debug_cfg=selector_debug_cfg,
                 selector_debug_cfg_profile=selector_debug_cfg_profile,
                 selector_debug_cfg_page=selector_debug_cfg_page,
-                scroll_until_stable_cfg=scroll_until_stable_cfg,
                 profile_backup_name=profile_backup_name if worker_id == 1 else None,
             )
-            for worker_id, batch in enumerate(batches, start=1)
+            for worker_id, batch in enumerate(page_batches, start=1)
         ]
 
         for future in as_completed(futures):
             for index, page_data in future.result():
                 indexed_results[index] = page_data
 
-    return [indexed_results[index] for index in range(len(crawl_targets))]
+    return [indexed_results[index] for index in range(len(uids))]
 
 
 def main() -> int:
@@ -239,49 +219,24 @@ def main() -> int:
         help="Optional output JSON file to write crawl results.",
     )
     parser.add_argument(
-        "--test-uid",
-        dest="test_uid",
-        help="Provide a static UID to crawl directly without waiting for dequeue API.",
+        "--events-url",
+        default=DEFAULT_EVENTS_URL,
+        help="Events endpoint URL to post completion payload.",
     )
     args = parser.parse_args()
 
-    env = load_env_file(".env")
     if not args.api_key:
-        args.api_key = env.get("API_KEY")
-    events_url = build_service_url(
-        env,
-        path="/events",
-        explicit_key="EVENTS_URL",
-        fallback=DEFAULT_EVENTS_URL,
-    )
+        logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
+        return 2
 
-    if args.test_uid:
-        logger.info("[TEST MODE] Skipping API queue, using static test UID: %s", args.test_uid)
-        items = [{
-            "task_id": "test_id_999",
-            "uid": args.test_uid,
-            "social_type": "facebook",
-            "crawl_types": ["page"],
-        }]
-    else:
-        if not args.api_key:
-            logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
-            return 2
+    result = run_curl(args.api_key)
+    if result.returncode != 0:
+        logger.error("Dequeue request failed: %s", result.stderr.strip())
+        return result.returncode
 
-        result = run_curl(args.api_key)
-        if result.returncode != 0:
-            logger.error("Dequeue request failed: %s", result.stderr.strip())
-            return result.returncode
-
-        payload = parse_dequeue_payload(result.stdout or "")
-        # print("payload>>>>>>>>>", payload)
-        items = extract_items(payload)
-        print("Items from payload: ", items)
-
-    if not items:
-        logger.info("Queue is empty or contains no valid tasks. Exiting safely.")
-        return 0
-
+    payload = parse_dequeue_payload(result.stdout or "")
+    items = extract_items(payload)
+    env = load_env_file(".env")
     #@anhtb temp cookies for test
     account_cookies_file = env.get("ACCOUNT_COOKIES_FILE")
     account_cookies = load_account_cookies(account_cookies_file)
@@ -368,22 +323,23 @@ def main() -> int:
             if not valid_items:
                 continue
 
+            uids = collect_uids(valid_items)
             results = _crawl_from_uids(
-                valid_items,
+                uids,
                 config=config,
                 selector_module=module or inferred_module,
                 max_workers_override=args.max_workers,
                 cookies_override=group.get("cookies"),
                 profile_backup_name=group.get("account_uid"),
             )
-            for item, result in zip(valid_items, results):
+            for item, page_result in zip(valid_items, results):
                 indexed_results[item["_index"]] = {
                     "task_id": item.get("task_id"),
                     "uid": item.get("uid"),
                     "social_type": item.get("social_type"),
                     "crawl_types": item.get("crawl_types"),
                     "selector_module": item.get("selector_module"),
-                    "result": result,
+                    "result": page_result,
                 }
 
     for index in range(len(items)):
@@ -407,7 +363,7 @@ def main() -> int:
         task_id = item.get("task_id")
         result_payload = item.get("result")
         if task_id and isinstance(result_payload, dict):
-            post_event(args.api_key, events_url, str(task_id), result_payload)
+            post_event(args.api_key, args.events_url, str(task_id), result_payload)
         else:
             logger.warning("[event] Skipped invalid event payload for item: %s", item)
 
