@@ -62,6 +62,7 @@ def _crawl_from_uids(
     max_workers_override: int | None,
     cookies_override: str | None = None,
     profile_backup_name: str | None = None,
+    login_method_override: str | None = None,
 ) -> List[Dict[str, Any]]:
     crawl_cfg = config["crawl"]
     login_cfg = config["login"]
@@ -85,7 +86,8 @@ def _crawl_from_uids(
     proxy = select_working_proxy(env.get("PROXY"), proxies_file)
 
     login_method = (
-        env.get("LOGIN_METHOD")
+        login_method_override
+        or env.get("LOGIN_METHOD")
         or login_cfg.get("method")
         or "cookies"
     ).strip().lower()
@@ -230,11 +232,6 @@ def main() -> int:
         help="Override max worker threads (takes precedence over .env/config).",
     )
     parser.add_argument(
-        "--selector-module",
-        dest="selector_module",
-        help="Selector module to use (overrides inference).",
-    )
-    parser.add_argument(
         "--out",
         help="Optional output JSON file to write crawl results.",
     )
@@ -242,6 +239,11 @@ def main() -> int:
         "--test-uid",
         dest="test_uid",
         help="Provide a static UID to crawl directly without waiting for dequeue API.",
+    )
+    parser.add_argument(
+        "--anonymous",
+        action="store_true",
+        help="Run crawler in anonymous (incognito) mode.",
     )
     args = parser.parse_args()
 
@@ -294,7 +296,7 @@ def main() -> int:
     if isinstance(config.get("selectors"), dict):
         selector_root = config["selectors"]
     selector_modules = _normalize_selector_modules(selector_root)
-    inferred_module = infer_selector_module(items, selector_modules, args.selector_module)
+    inferred_module = infer_selector_module(items, selector_modules, None)
 
     response_items: List[Dict[str, Any]] = []
     grouped_items: Dict[str, Dict[str, Any]] = {}
@@ -331,7 +333,7 @@ def main() -> int:
         group_items = group["items"]
         module_buckets: Dict[str | None, List[Dict[str, Any]]] = {}
         for item in group_items:
-            inferred = infer_module_for_item(item, selector_modules, args.selector_module)
+            inferred = infer_module_for_item(item, selector_modules, None)
             item["selector_module"] = inferred
             module_buckets.setdefault(inferred, []).append(item)
 
@@ -375,6 +377,7 @@ def main() -> int:
                 max_workers_override=args.max_workers,
                 cookies_override=group.get("cookies"),
                 profile_backup_name=group.get("account_uid"),
+                login_method_override="anonymous" if args.anonymous else None,
             )
             for item, result in zip(valid_items, results):
                 indexed_results[item["_index"]] = {

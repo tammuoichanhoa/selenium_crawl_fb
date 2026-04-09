@@ -1,121 +1,103 @@
-# Facebook Crawl Pipeline
+# Facebook Auto Crawler
 
-Dự án này là công cụ tự động cào dữ liệu Facebook (Profile, Page, Group...) bằng **Selenium**. Hệ thống được thiết kế để kết nối trực tiếp với API hàng đợi (Queue) để nhận nhiệm vụ, thực hiện thu thập thông tin chuyên sâu (Deep Crawl) song song đa luồng, và gửi kết quả về máy chủ.
+Dự án này là công cụ tự động cào dữ liệu Facebook (Profile, Page, Group...) bằng **Selenium**. Hệ thống được thiết kế theo kiến trúc phi tập trung, kết nối với API phân phối nghiệp vụ (Queue) để nhận linh hoạt UID xử lý, tiến hành phân giải và thu thập thông tin chuyên sâu (Deep Crawl) song song đa luồng, và tự động liên kết gởi kết quả về máy chủ.
 
-Công cụ hỗ trợ mạnh mẽ việc xoay vòng User-Agent, proxy, gỡ lỗi cổng, và sử dụng Cookies hoặc Chrome Profile để duy trì phiên đăng nhập.
+Công cụ tối ưu hóa hiệu suất với cơ chế ẩn danh luân phiên, gỡ lỗi cổng linh hoạt, hỗ trợ lưu và sử dụng Cookies hoặc Chrome Profile để duy trì phiên đăng nhập bền vững. Hệ thống hiện tại có khả năng tự động nội suy (infer) cấu hình để quét Profile hoặc Page nhanh với độ chính xác tuyệt đối mà không cần chỉ định thủ công.
 
-`main.py` là entrypoint nên dùng nếu bạn chạy theo queue hoặc muốn test nhanh một UID.
-
-Chức năng chính:
-
-* **Hệ điều hành:** Khuyến nghị Linux, macOS hoặc Windows.
-* **Ngôn ngữ:** Python 3.10 trở lên.
-* **Trình duyệt:** Bắt buộc cài đặt [Google Chrome](https://www.google.com/chrome/).
-* **Driver:** Hệ thống có cơ chế tự tìm và tích hợp WebDriver phù hợp với bản Chrome hiện tại qua cơ chế nội bộ của Selenium Manager.
-
-Ví dụ:
+---
 
 ## 🚀 Hướng Dẫn Cài Đặt (Setup)
 
-1. **Clone mã nguồn (nếu chưa có):**
-    ```bash
-    git clone <repository_url>
-    cd facebook_crawler
-    ```
-
-2. **Cài đặt thư viện Python:**
-    Tạo môi trường ảo hóa (`venv` hoặc `conda`) để tránh va chạm thư viện hệ thống:
+1. **Cài đặt thư viện Python:**
+    Khuyến nghị tạo môi trường ảo hóa (`venv`) từ Python 3.10 trở lên để tránh va chạm thư viện:
     ```bash
     python -m venv venv
     
-    # Kích hoạt môi trường (trên Windows)
+    # 1. Kích hoạt môi trường (trên Windows)
     venv\Scripts\activate
     
     # Kích hoạt môi trường (trên Linux/macOS)
     source venv/bin/activate
     
-    # Cài đặt file requirements
+    # 2. Cài đặt các requirements
     pip install -r requirements.txt
     ```
 
-3. **Cấu hình môi trường (`.env`):**
-    Copy file mẫu `.env.example` sang `.env` (hoặc tạo file mới ` .env ` ở thư mục gốc) chứa các thiết lập cốt lõi:
+2. **Cấu hình biến môi trường (`.env`):**
+    Toàn bộ cấu hình hệ thống giờ được quản lý tập trung ở file `.env`. 
+    Tiến hành copy `env` mẫu hoặc tự tạo một file `.env` cực gọn ngay trong thư mục clone:
     ```env
-    # Mẫu .env khởi tạo
+    # API & Endpoints
     API_KEY=your_api_token_here
-    COOKIES=c_user=...;xs=...;fr=...;
-    LOGIN_METHOD=cookies
-    PROFILE_DIR=./chrome_profile
+    DEQUEUE_URL=https://<your-host>/tasks/dequeue?social_type=facebook&version=1.0
+    EVENTS_URL=https://<your-host>/events
+    
+    # Định dạng Đăng nhập
+    LOGIN_METHOD=Profile # Hỗ trợ: Profile, cookies, anonymous
+    
+    # Thư mục chứa Chrome profile và giới hạn luồng Worker
+    PROFILE_DIRS=chrome_profile_1,chrome_profile_2,chrome_profile_3
     MAX_WORKERS=3
-    HEADLESS=false # Đặt true nếu chạy trên server ẩn UI
+    
+    # Phụ trợ ẩn hiển Chrome
+    HEADLESS=false
     ```
 
 ---
 
 ## 🏃 Cách Chạy Ứng Dụng (How to run)
 
-Điểm bắt đầu (Entry point) chính của tool là file `main.py`. Tool được thiết kế theo mô hình vòng lặp tự động: **Xin nhiệm vụ -> Cào dữ liệu -> Trả kết quả**.
+Entrypoint chính và duy nhất của toàn bộ hệ thống dự án nằm tại **`main.py`**. Cơ chế hoạt động: **Xin API tác vụ -> Phân phát đa luồng Cào dữ liệu -> POST kết quả về server**.
 
-### Chạy trực tiếp qua API (Môi trường Thực tế)
+### 👉 Chạy Đầy Đủ API (Môi trường Thực tế)
+Khởi chạy lệnh cơ bản để máy con (worker) tự động thực thi chuỗi tuần hoàn:
 ```bash
 python main.py
 ```
-> **Luồng tác vụ:** Tool sẽ đọc `API_KEY` từ biến môi trường (hoặc `.env`), tự động đẩy yêu cầu lấy công việc từ máy chủ. Sau cài cào xong, hệ thống ngầm đóng gói kết quả và POST trả `event_type: complete` về máy chủ.
+> **Luồng tác vụ:** Khởi động, đọc biến môi trường để nạp URL. Mở `curl` liên lạc API `DEQUEUE_URL` để lấy UID tác vụ, đưa lên ThreadPoolExecutor lấy dữ liệu rồi gom báo cáo về đường dẫn `EVENTS_URL`. Sự kiện sẽ có log `event_type: complete` lúc xử lý thành công.
 
-### Chạy để Test 1 UID/Fanpage cụ thể (Bỏ qua cấu hình Queue)
-Nếu bạn chỉ muốn kiểm thử 1 fanpage (ví dụ trang `cambongda`) mà không gọi qua API lấy lệnh ngoài:
+### 👉 Chạy Test Độc Lập 1 Account/Fanpage
+Nếu phát triển nhanh, bạn muốn nhảy vọt gọi qua API nhận lệnh mà chỉ cần crawler thử trang `cambongda`:
 ```bash
-python main.py --test-uid cambongda --selector-module page
+python main.py --test-uid cambongda
 ```
-
-Trong [configs/base.json](/home/baoanh/Desktop/Workplace/selenium_crawl_fb/configs/base.json), crawler đang override thành:
-
-## 🚩 Các Cờ Tham Số (Flags) cho `main.py`
-
-| Flag | Chức năng chi tiết | Tùy chọn đi kèm ví dụ |
-| :--- | :--- | :--- |
-| `--test-uid` | Khởi chạy Crawler chỉ tập trung cào duy nhất Account UID (hoặc URL rút gọn) này để test. Bỏ qua luồng gọi lấy tác vụ từ Hàng đợi API. | `--test-uid cambongda` |
-| `--max-workers` | Chèn đè (Override) lượng luồng Webdriver song song đang cố định gốc. Phù hợp nếu máy mạnh muốn chạy đa trình duyệt. | `--max-workers 3` |
-| `--selector-module` | Ép công cụ dùng bộ logic cạo của cấu hình cho trước (có thể là `page`, `profile`, `group`) thay vì Tool tự dự đoán. | `--selector-module page` |
-| `--api-key` | Token để xác thực lấy Việc / Nộp Việc qua API. Truyền vào đây làm biến ưu tiên. | `--api-key abcxyz...` |
-| `--events-url` | Chỉ định URL của hệ thống nhận/lắng nghe báo cáo tiến độ và tiếp nhận Database thu thập được. | `--events-url https://api/...` |
-| `--out` | Đường dẫn file lưu cứng lại JSON toàn bộ Output để kiểm thử độc lập ở Local. | `--out crawl_results.json` |
-
-## Ghi chú triển khai
-
-## 🔄 Luồng Gọi API và Xử Lý Dữ Liệu (API Flow)
-
-Quá trình crawler diễn ra theo các bước giao tiếp API khép kín sau đây:
-
-1. **Dequeue Task (Nhận tác vụ API):**
-   - File `main.py` tiến hành đóng gói Header (chứa `Authorization: Bearer <API_KEY>`) để gọi lên đường dẫn Queue System.
-   - Nhận về danh sách JSON chứa các `task_id` và đối tượng (`UID/URL`) cần cào. 
-
-2. **Khởi tạo và Phân bổ Chạy Đa Luồng:**
-   - Số lượng UID mục tiêu được chia nhét vào các bộ Batch.
-   - Luồng nền `ThreadPoolExecutor` mở ra theo số lượng `--max-workers`. Mỗi một luồng chiếm dụng 1 cổng debug (Port), gắn Cookie và nạp Proxy mở sẵn màn hình Chrome.
-
-3. **Thu thập dữ liệu chuyên sâu (Deep Crawling Workflow):**
-   - Trình duyệt truy cập tận gốc mục tiêu.
-   - **Page Info:** Quét sâu HTML: Lấy Tên, Lượt theo dõi, Avatar, Cover. Đặc biệt lấy dải ảnh High-Res (Độ phân giải siêu cao) bằng kỹ thuật *Nhân bản Tab ẩn (Tab Batching)*. Thu thập mục giới thiệu, tin đáng chú ý. Kết quả tạm lưu cache vào `database/profile/page/<tên>/profile_info.json`.
-   - **Post Data:** Cuộn chuột lặp liên tục dải Timeline, cào toàn bộ nội dung Post từng giây, đóng dồn vào file Database cục bộ `posts_all.ndjson`. Mỗi mốc cuộn lại lưu Checkpoint bảo hiểm (tránh hỏng data).
-   - **Đóng gói Kết quả:** Hệ thống đọc 2 file Database `profile_info` và toàn bộ nội dung file `posts_all.ndjson` gộp chung lại vào một biến từ điển Python (`page_data`).
-
-4. **Trả kết quả (Submit / Post Event):**
-   - `main.py` gọi hàm `_post_event()` để nhồi toàn bộ gói dữ liệu JSON `page_data` vô thuộc tính Payload của HTTP POST Request và bắn sang cho `--events-url`. Header vẫn tuân thủ kèm khóa `API_KEY`. Tác vụ hoàn tất vòng đời.
+> Nhờ tính năng tự động suy luận loại URL, tool sẽ đọc HTML hoặc Regex tự suy đoán "cambongda" là Fanpage/Profile và chọn bộ Module lấy bộ chọn (Selector) tương ứng mà không cầnbạn báo trước.
 
 ---
 
-## 🛑 Bắt Lỗi & Xử Lý Sự Cố Thường Gặp (Troubleshooting)
+## 🚩 Các Cờ Tùy Chỉnh (CLI Flags)
+Vì mọi thứ đã được nhúng trong `.env`, số lượng options tham số dòng lệnh cực kì tinh gọn:
 
-1. **Lỗi `[WinError 10061] Connection refused` hoặc `Max retries exceeded with url`**:
-   - *Nguyên nhân:* Cửa sổ Chrome bị tắt cưỡng bức bằng tay (dấu X màu đỏ), hoặc máy tính thiếu RAM dẫn tới trình duyệt "Crash" khiến ống thông tin giữa Selenium và hệ điều hành bị sập đứt đoạn.
-   - *Cách xử lý:* Nếu máy yếu, giảm thông số `--max-workers 1`. Đừng bao giờ tắt thủ công cửa sổ Chrome khi log màn hình đang chạy chữ `[worker 1]`.
+| Flag | Chức năng chi tiết | Ví dụ đi kèm |
+| :--- | :--- | :--- |
+| `--test-uid` | Khởi chạy quét nhanh chuyên biệt 1 cục UID/URL, bỏ qua Queue Request. | `--test-uid zuck` |
+| `--max-workers` | Định khung chèn đè lượng luồng Webdriver đang chạy song song, thay cho config. | `--max-workers 3` |
+| `--api-key` | Token thủ công để bảo mật hệ thống khi Submit kết quả API. | `--api-key abcxyz` |
+| `--out` | Đường dẫn file lưu cứng JSON Output toàn bộ dữ liệu cào ra. | `--out backup.json` |
 
-2. **Lỗi Không Login được Facebook (Tạch tài khoản / Trắng xóa Cookie)**:
-   - *Nguyên nhân:* Chuỗi Cookie do bạn gắn trong tệp `.env` đã vi phạm ngày hết hạn, hoặc bị Facebook đá phiên.
-   - *Cách xử lý:* Hãy trích xuất Cookie tươi lại từ Extension và đút vào `.env`. (Có thể dùng profile session để lưu lâu năm).
+---
 
-3. **Công cụ thu thập bài viết bị hẫng hoặc không thu bài nào**:
-   - *Nguyên nhân:* Gặp Pop-up làm mờ nền màn hình yêu cầu Đăng nhập của Facebook cản trở tầm nhìn thẻ Div của DOM, và làm kẹt thao tác Cuộn (Scroll) chuỗi timeline.
-   - *Cách khắc phục:* Đảm bảo trạng thái tài khoản Cookie cung cấp phải ở trạng thái sống khỏe và log-in trên trình duyệt. Mở thử trình duyệt ẩn lên trực quan xem Fanpage có đang khóa Vùng Địa Lý quốc gia với Account đang Crawler hay không.
+## 🔄 Phác Tọa Core Workflow (Quy trình nội bộ)
+
+Quá trình crawler diễn ra theo các bước giao tiếp API khép kín sau đây:
+
+1. **Nhận Tác Vụ:** `main.py` kết hợp biến `DEQUEUE_URL` và Header gởi Request (Authorization). Trích mã JSON tìm kiếm công việc.
+2. **Cơ Chế Suy Luận (Inference Engine):** Các hàm trong `task_flow.py` được khởi động để đánh giá nội dung tải xuống, quét HTML và đoán định thực thể Facebook (Người Dùng hay Fanpage) chính xác 100%. Tự động kết nối Selector đúng hệ.
+3. **Deep Crawling Timeline:** Bóc tách Profile/Về Info và cuộn timeline lặp liên tục để bắt triệt để nội dung các Posts. Đóng băng checkpoint thường xuyên để lưu trạng thái file `.json/.ndjson` để lỡ Crash thì không mất trắng bài cũ.
+4. **Đồng Bộ & Trả (Submit Events):** Hệ thống gom góp toàn bộ Object vào biến Payload gạch qua Event URL và báo cáo đóng Job.
+
+---
+
+## 🛑 Bắt Lỗi & Gỡ Rối Nhanh (Troubleshooting)
+
+1. **Lỗi `[WinError 10061] Connection refused` hoặc `Max retries exceeded`**:
+   - *Nguyên nhân:* Cửa sổ Chrome bị tắt cưỡng bức bằng tay, hoặc RAM quá tải trình duyệt Crash.
+   - *Cách xử lý:* Giảm bớt số lượng Profile khai báo hoặc kéo `--max-workers 1`. Đừng đóng Chrome chừng nào Terminal log đang chạy.
+   
+2. **Facebook Block / Trắng tinh Cookie**:
+   - *Nguyên nhân:* Trình điều khiển báo Cookie hết hạn, login văng Auth.
+   - *Cách xử lý:* Dùng tiện ích Trình duyệt xuất lại Cookie Json gán vào `.env` hoặc cấp lại Profile thư mục mới sạch sẽ và login bằng tay lại một lần.
+
+3. **Cào không được nội dung bài Post (Scroll cứng đơ)**:
+   - *Nguyên nhân:* Bị FB gài Popup Đăng nhập Overlay đè che mất màn hình, làm tính toán chiều cao trang bị treo. 
+   - *Khắc phục:* Login thật sống khỏe tài khoản trước khi thực thi, hoặc chọn `--test-uid` check trước trạng thái chặn địa lý VPN của tool.
