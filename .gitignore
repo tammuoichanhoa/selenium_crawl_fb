@@ -64,3 +64,6 @@ debug_artifacts/
 main_comparison.md
 main_thai.py
 scripts/crawler_thai.py
+main_ba.py
+solution.md
+ba-docs.txt
