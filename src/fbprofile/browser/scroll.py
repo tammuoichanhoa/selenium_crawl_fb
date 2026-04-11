@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import Set, Dict, Any
 
 from logs.loging_config import logger
-from ..browser.hooks import CLEANUP_JS, flush_gql_recs
-from ..graphql.extractors import _best_primary_key
-from ..pipeline import process_single_gql_rec  # sẽ tạo file này bên dưới
+from ..browser.hooks import CLEANUP_JS
+from .selector_posts import process_visible_selector_posts
 from .stable_scroll import get_scroll_height, normalize_scroll_until_stable_cfg
+
 
 
 _SHOULD_STOP = False
@@ -68,6 +68,23 @@ def crawl_scroll_loop(
             logger.info("[STOP] Reach MAX_SCROLLS=%d, break loop.", max_scrolls)
             break
 
+        total_new_from_batch = process_visible_selector_posts(
+            d,
+            group_url=group_url,
+            seen_ids=seen_ids,
+            out_path=out_path,
+            log_prefix=f"#{i}",
+            ts_state=ts_state,
+        )
+
+        if total_new_from_batch:
+            logger.info(
+                "[SEL] #%d: collected %d new posts (total_seen=%d)",
+                i,
+                total_new_from_batch,
+                len(seen_ids),
+            )
+
         try:
             d.execute_script(
                 "window.scrollBy(0, Math.floor(window.innerHeight * 0.9));"
@@ -78,29 +95,6 @@ def crawl_scroll_loop(
 
         if scroll_pause_seconds > 0:
             time.sleep(scroll_pause_seconds)
-
-        recs = flush_gql_recs(d)
-        total_new_from_batch = 0
-
-        if recs:
-            for idx, rec in enumerate(recs):
-                num_new = process_single_gql_rec(
-                    rec,
-                    group_url=group_url,
-                    seen_ids=seen_ids,
-                    out_path=out_path,
-                    log_prefix=f"#{i}/{idx}",
-                    ts_state=ts_state,
-                )
-                total_new_from_batch += num_new
-
-            if total_new_from_batch:
-                logger.info(
-                    "[GQL] #%d: collected %d new posts (total_seen=%d)",
-                    i,
-                    total_new_from_batch,
-                    len(seen_ids),
-                )
 
         if i > 0 and (i % CLEANUP_EVERY == 0):
             try:

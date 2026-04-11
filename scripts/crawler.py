@@ -15,7 +15,7 @@ import traceback
 from selenium.webdriver.common.by import By
 
 from src.fbprofile.storage.paths import compute_paths
-from src.fbprofile.browser.hooks import install_early_hook
+from src.fbprofile.browser.hooks import flush_gql_recs, install_early_hook
 from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
 from src.fbprofile.browser.navigation import go_to_date
 from src.fbprofile.browser.scroll import crawl_scroll_loop
@@ -339,28 +339,36 @@ def crawl_urls_batch(
                         worker_id,
                         url,
                     )
-                page_data = crawl_page(
-                    driver,
-                    url,
-                    resolved_entity_type,
-                    elements_cfg,
-                    elements_cfg_profile,
-                    elements_cfg_page,
-                    wait_after_load,
-                    element_timeout,
-                    default_wait_cfg,
-                    default_wait_cfg_profile,
-                    default_wait_cfg_page,
-                    selector_debug_cfg,
-                    selector_debug_cfg_profile,
-                    selector_debug_cfg_page,
-                )
-                target_date = datetime.date.today()
-                if "group" not in url:
-                    try:
-                        go_to_date(driver, target_date)
-                    except Exception as e:
-                        logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
+
+                # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
+                # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
+                driver.get(url)
+                wait_for_page_ready(driver, 20)
+                wait_for_seconds(driver, wait_after_load)
+                flush_gql_recs(driver)
+
+                # page_data = crawl_page(
+                #     driver,
+                #     url,
+                #     resolved_entity_type,
+                #     elements_cfg,
+                #     elements_cfg_profile,
+                #     elements_cfg_page,
+                #     wait_after_load,
+                #     element_timeout,
+                #     default_wait_cfg,
+                #     default_wait_cfg_profile,
+                #     default_wait_cfg_page,
+                #     selector_debug_cfg,
+                #     selector_debug_cfg_profile,
+                #     selector_debug_cfg_page,
+                # )
+                # target_date = datetime.date.today()
+                # if "group" not in url:
+                #     try:
+                #         go_to_date(driver, target_date)
+                #     except Exception as e:
+                #         logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
 
                 seen_ids = set()
                 ts_state = {"latest": None, "earliest": None}
@@ -398,7 +406,7 @@ def crawl_urls_batch(
                                     posts_data.append(json.loads(line))
                     except Exception as e:
                         logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
-
+                page_data = {}
                 page_data["profile_info"] = profile_data
                 page_data["posts"] = posts_data
                 page_data["posts_collected"] = len(seen_ids)
@@ -691,7 +699,7 @@ def main() -> None:
                 selector_debug_cfg=selector_debug_cfg,
                 selector_debug_cfg_profile=None,
                 selector_debug_cfg_page=None,
-                scroll_until_stable_cfg=scroll_until_stable_cfg,
+                # scroll_until_stable_cfg=scroll_until_stable_cfg,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]

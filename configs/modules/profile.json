@@ -55,24 +55,34 @@
     "profile.avatar": {
       "primary": {
         "type": "xpath",
-        "value": "//*[name()='svg'][@role='img']//*[name()='image']",
+        "value": "//svg[@aria-label='Hành động với ảnh đại diện']//image",
         "priority": 6
       },
       "fallbacks": [
         {
           "type": "css",
-          "value": "image[xlink\\:href]",
+          "value": "//*[@role='button' and @aria-label='Hành động với ảnh đại diện']",
           "priority": 5
         },
         {
           "type": "xpath",
-          "value": "//img[contains(@src,'fbcdn.net')]",
+          "value": "//div[@aria-label='Hành động với ảnh đại diện']",
           "priority": 4
         },
         {
           "type": "css",
-          "value": ".x1jx94hy > .x1i10hfl",
+          "value": "[aria-label=\"Hành động với ảnh đại diện\"]",
+          "priority": 3
+        },
+        {
+          "type": "xpath",
+          "value": "//img[contains(@src,'fbcdn.net')]",
           "priority": 2
+        },
+        {
+          "type": "css",
+          "value": ".x1jx94hy > .x1i10hfl",
+          "priority": 1
         }
       ],
       "wait": {
@@ -182,197 +192,6 @@
       },
       "attribute": "text"
     },
-    "profile.bio": {
-      "primary": {
-        "type": "data-testid",
-        "value": "profile_intro_bio",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "css",
-          "value": "div[data-testid='profile_intro_bio']",
-          "priority": 5
-        },
-        {
-          "type": "xpath",
-          "value": "//div[contains(@class,'x1gslohp')]//span",
-          "priority": 4
-        },
-        {
-          "type": "css",
-          "value": "span.x193iq5w",
-          "priority": 3
-        },
-        {
-          "type": "xpath",
-          "value": "//span[contains(@class,'x193iq5w')]",
-          "priority": 2
-        },
-        {
-          "type": "css",
-          "value": ".xp6pnuw > .xeuugli",
-          "priority": 2
-        },
-        {
-          "type": "css",
-          "value": "[data-actual-height=\"50\"]",
-          "priority": 1
-        },
-        {
-          "type": "css",
-          "value": "[data-comp-id=\"6\"]",
-          "priority": 1
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.address": {
-      "primary": {
-        "type": "xpath",
-        "value": "//h2[.//span[normalize-space()='Thông tin cá nhân']]/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[normalize-space()='Sống ở Hà Nội']",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "xpath",
-          "value": "//span[normalize-space()='Thông tin cá nhân']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[contains(normalize-space(), 'Sống ở ')]",
-          "priority": 5
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.company": {
-      "primary": {
-        "type": "xpath",
-        "value": "//span[normalize-space()='Công việc']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[@id][1]//span[normalize-space()]",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "xpath",
-          "value": "//span[normalize-space()='Công việc']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//div[@role='listitem']//span[normalize-space()='MBBank']",
-          "priority": 5
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.school": {
-      "primary": {
-        "type": "xpath",
-        "value": "//span[contains(@class,'x6s0dn4')]",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "css",
-          "value": "[data-action-id=\"32741\"]",
-          "priority": 1
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.gender": {
-      "primary": {
-        "type": "xpath",
-        "value": "//span[normalize-space()='Thông tin cá nhân']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//span[normalize-space()='Nữ' or normalize-space()='Nam']",
-        "priority": 6
-      },
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.contact": {
-      "primary": {
-        "type": "xpath",
-        "value": "//a[starts-with(@href,'http')]",
-        "priority": 5
-      },
-      "fallbacks": [
-        {
-          "type": "css",
-          "value": "span > .x1fey0fg",
-          "priority": 3
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.jobs": {
-      "primary": {
-        "type": "xpath",
-        "value": "//span[normalize-space()='Công việc']/ancestor::div[contains(@class,'x9f619')][1]/following-sibling::div[@role='list'][1]//div[@role='listitem']",
-        "priority": 6
-      },
-      "multiple": true,
-      "limit": 20,
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.education": {
-      "primary": {
-        "type": "css",
-        "value": ".x1n2onr6 .x6s0dn4",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "xpath",
-          "value": "//div[contains(@class,'x6s0dn4')]",
-          "priority": 4
-        }
-      ],
-      "multiple": true,
-      "limit": 20,
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "text"
-    },
-    "profile.photos": {
-      "primary": {
-        "type": "xpath",
-        "value": "//a[contains(@href, 'photo.php')]//img",
-        "priority": 6
-      },
-      "fallbacks": [
-        {
-          "type": "xpath",
-          "value": "//img[contains(@src,'fbcdn.net')]",
-          "priority": 4
-        }
-      ],
-      "wait": {
-        "state": "presence",
-        "timeout_ms": 10000
-      },
-      "attribute": "src"
-    },
     "profile.featured.collection_link": {
       "primary": {
         "type": "xpath",
@@ -434,57 +253,6 @@
       },
       "attribute": "src"
     },
-    "profile.about.tab": {
-      "primary": {
-        "type": "xpath",
-        "value": "//a[@role='tab']//span[contains(text(), '{keyword}')]",
-        "priority": 5
-      },
-      "attribute": "text"
-    },
-    "profile.about.details.section": {
-      "primary": {
-        "type": "xpath",
-        "value": "//div[@class='x1iyjqo2']//div[@class='xieb3on x1gslohp']",
-        "priority": 5
-      },
-      "multiple": true,
-      "attribute": "text"
-    },
-    "profile.about.details.header": {
-      "primary": {
-        "type": "xpath",
-        "value": ".//h2",
-        "priority": 5
-      },
-      "attribute": "text"
-    },
-    "profile.about.details.content": {
-      "primary": {
-        "type": "xpath",
-        "value": "./following-sibling::div[contains(@class, 'xat24cr')]",
-        "priority": 5
-      },
-      "attribute": "text"
-    },
-    "profile.about.rows_primary": {
-      "primary": {
-        "type": "xpath",
-        "value": "//div[contains(@class, 'x13faqbe')]",
-        "priority": 5
-      },
-      "multiple": true,
-      "attribute": "text"
-    },
-    "profile.about.rows_fallback": {
-      "primary": {
-        "type": "xpath",
-        "value": "//div[@class='x1iyjqo2']//div[@class='x1gslohp']",
-        "priority": 4
-      },
-      "multiple": true,
-      "attribute": "text"
-    },
     "profile.photos.thumb": {
       "primary": {
         "type": "xpath",
@@ -544,6 +312,323 @@
         "priority": 4
       },
       "attribute": "src"
+    },
+    "profile.posts.container": {
+      "primary": {
+        "type": "css",
+        "value": "div[data-pagelet*='FeedUnit']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "div[role='article']",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "div[aria-posinset]",
+          "priority": 4
+        }
+      ],
+      "multiple": true,
+      "attribute": "text"
+    },
+    "profile.posts.link": {
+      "primary": {
+        "type": "css",
+        "value": "a[href*='/posts/']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[href*='/permalink/']",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "a[href*='story_fbid=']",
+          "priority": 4
+        },
+        {
+          "type": "css",
+          "value": "a[href*='/reel/']",
+          "priority": 3
+        },
+        {
+          "type": "css",
+          "value": "a[role='link'][href*='facebook.com']",
+          "priority": 2
+        }
+      ],
+      "multiple": true,
+      "attribute": "href"
+    },
+    "profile.posts.timestamp": {
+      "primary": {
+        "type": "css",
+        "value": "a[href*='/posts/pfbid']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[href*='/posts/']",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "a[href*='/permalink/']",
+          "priority": 4
+        },
+        {
+          "type": "css",
+          "value": "a[href*='story_fbid=']",
+          "priority": 3
+        }
+      ],
+      "attribute": "href"
+    },
+    "profile.posts.photo_link": {
+      "primary": {
+        "type": "css",
+        "value": "a[href*='fbid=']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[href*='/photo/']",
+          "priority": 5
+        }
+      ],
+      "attribute": "href"
+    },
+    "profile.posts.author_name": {
+      "primary": {
+        "type": "css",
+        "value": "h2 a[role='link'] span[dir='auto']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "h2 a b span",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "strong span[dir='auto']",
+          "priority": 4
+        },
+        {
+          "type": "css",
+          "value": "a[role='link'] h3 span[dir='auto']",
+          "priority": 3
+        }
+      ],
+      "attribute": "text"
+    },
+    "profile.posts.author_url": {
+      "primary": {
+        "type": "css",
+        "value": "h2 a[href*='facebook.com']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[role='link'][href*='facebook.com'][aria-label]",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "strong a[href*='facebook.com']",
+          "priority": 4
+        }
+      ],
+      "attribute": "href"
+    },
+    "profile.posts.author_avatar": {
+      "primary": {
+        "type": "css",
+        "value": "a[aria-label] image",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "svg[role='img'] image",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "image",
+          "priority": 4
+        },
+        {
+          "type": "css",
+          "value": "img[referrerpolicy]",
+          "priority": 3
+        }
+      ],
+      "attribute": "src"
+    },
+    "profile.posts.content": {
+      "primary": {
+        "type": "css",
+        "value": "[data-ad-comet-preview='message'] [dir='auto']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "div[data-ad-preview='message'] [dir='auto']",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "div[dir='auto'][style*='text-align']",
+          "priority": 4
+        }
+      ],
+      "attribute": "text"
+    },
+    "profile.posts.image": {
+      "primary": {
+        "type": "css",
+        "value": "a[href*='photo'] img",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "img[data-imgperflogname='feedCoverPhoto']",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "img[data-visualcompletion='media-vc-image']",
+          "priority": 4
+        },
+        {
+          "type": "css",
+          "value": "img[alt='']",
+          "priority": 3
+        }
+      ],
+      "multiple": true,
+      "attribute": "src"
+    },
+    "profile.posts.video": {
+      "primary": {
+        "type": "tagName",
+        "value": "video",
+        "priority": 6
+      },
+      "multiple": true,
+      "attribute": "src"
+    },
+    "profile.posts.timestamp_text": {
+      "primary": {
+        "type": "css",
+        "value": "a[href*='/posts/'] span",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[href*='/permalink/'] span",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "a[href*='story_fbid='] span",
+          "priority": 4
+        },
+        {
+          "type": "css",
+          "value": "abbr",
+          "priority": 3
+        },
+        {
+          "type": "css",
+          "value": "span[id*='timestamp']",
+          "priority": 2
+        }
+      ],
+      "attribute": "text"
+    },
+    "profile.posts.visibility": {
+      "primary": {
+        "type": "css",
+        "value": "span.xzpqnlu.x179tack",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "div[aria-label*='Công khai'] span",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "div[aria-label*='Public'] span",
+          "priority": 4
+        }
+      ],
+      "attribute": "text"
+    },
+    "profile.posts.link_preview.domain": {
+      "primary": {
+        "type": "css",
+        "value": "[data-ad-rendering-role='meta'] span",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[rel='nofollow noreferrer'] span[dir='auto']",
+          "priority": 5
+        }
+      ],
+      "attribute": "text"
+    },
+    "profile.posts.link_preview.title": {
+      "primary": {
+        "type": "css",
+        "value": "[data-ad-rendering-role='title'] span",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[rel='nofollow noreferrer'] h3 span",
+          "priority": 5
+        },
+        {
+          "type": "css",
+          "value": "a[rel='nofollow noreferrer'] span[dir='auto']",
+          "priority": 4
+        }
+      ],
+      "attribute": "text"
+    },
+    "profile.posts.link_preview.url": {
+      "primary": {
+        "type": "css",
+        "value": "a[rel='nofollow noreferrer']",
+        "priority": 6
+      },
+      "fallbacks": [
+        {
+          "type": "css",
+          "value": "a[target='_blank'][href^='http']",
+          "priority": 5
+        }
+      ],
+      "attribute": "href"
     }
   }
 }

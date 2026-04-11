@@ -3,7 +3,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict
-
+from selenium.webdriver.common.by import By
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -188,7 +188,6 @@ def _collect_texts_from_selector(driver, selector_name: str, timeout: int | None
 
     return values
 
-
 # ==========================================
 # 1. BASIC INFO (Tên, Avatar, Follower)
 # ==========================================
@@ -212,13 +211,16 @@ def get_name_followers_following_avatar(driver):
             logger.warning("[PROFILE] Không tìm thấy tên user.")
 
         try:
-            for img in _find_elements_by_selector(driver, "profile.avatar", timeout=10):
-                src = img.get_attribute("xlink:href") or img.get_attribute("href") or img.get_attribute("src")
-                if src and "fbcdn" in src:
-                    info["avatar_url"] = src
+            avatar_imgs = _find_elements_by_selector(driver, "profile.avatar", timeout=10)
+            for avatar_img in avatar_imgs:
+                avatar_url = avatar_img.get_attribute("xlink:href") or avatar_img.get_attribute("href")
+                if avatar_url and "fbcdn" in avatar_url:
+                    info["avatar_url"] = avatar_url
                     break
+
         except Exception as exc:
             logger.warning(f"[PROFILE] Lỗi lấy Avatar: {exc}")
+
 
         try:
             friends = _extract_text_from_selector(driver, "profile.friends_count", timeout=8)
@@ -242,17 +244,16 @@ def get_name_followers_following_avatar(driver):
             pass
 
         try:
-            cover_photo = _extract_attr_from_selector(driver, "profile.cover", "src", timeout=8)
+            cover_photo = _extract_attr_from_selector(driver, "profile.cover", "src", timeout=10)
             if cover_photo:
                 info["cover_photo"] = cover_photo
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[PROFILE] Lỗi lấy ảnh bìa: {exc}")
 
     except Exception as exc:
         logger.error(f"[PROFILE] Lỗi lấy Basic Info: {exc}")
 
     return info
-
 
 # ==========================================
 # 2. FEATURED NEWS (Tin nổi bật / Highlights)
@@ -370,51 +371,101 @@ def get_profile_featured_news(driver, target_url, timeout: int = 5):
 # ==========================================
 # 3. INTRODUCES (Giới thiệu / About)
 # ==========================================
-def get_profile_introduces(driver, target_url, timeout: int = 2) -> dict:
-    """Lấy thông tin introduction trực tiếp từ trang profile hiện tại."""
-    _ = target_url
+def _clean_section_item_text(text: str) -> str | None:
+    """Normalize one about-section item and drop empty/placeholder rows."""
+    text = text.strip()
+    if not text or "Không có" in text or "để hiển thị" in text:
+        return None
+    return text.replace("\n", " - ")
 
+
+def _get_section_items(driver, section_name: str) -> list[str]:
+    """Read list items under a named About section header."""
+    xpath = f"""
+    //h2[.//span[contains(normalize-space(),"{section_name}")]]
+    /following-sibling::div[@role='list'][1]
+    //div[@role='listitem']
+    """
+    items = []
+
+    for element in driver.find_elements(By.XPATH, xpath):
+        clean_text = _clean_section_item_text(element.text)
+        if clean_text and clean_text not in items:
+            items.append(clean_text)
+
+    return items
+
+
+def _extract_intro_sections(driver, timeout: int = 5) -> dict:
+    """Collect intro data split by visible section names."""
     data = {
-        "jobs": [],
-        "education": [],
-        "places": [],
-        "contact_basic": [],
-        "bio": None,
-        "company": None,
-        "gender": None,
-    }
-    logger.info("[PROFILE] Đang quét thông tin Giới thiệu...")
-
-    list_selector_mapping = {
-        "jobs": "profile.jobs",
-        "education": "profile.education",
-        "places": "profile.address",
-        "contact_basic": "profile.contact",
+        "personal_info": [],
+        "contact_info": [],
     }
 
-    scalar_selector_mapping = {
-        "bio": "profile.bio",
-        "company": "profile.company",
-        "gender": "profile.gender",
-    }
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='main']"))
+        )
+    except TimeoutException:
+        logger.info("[PAGE] Không tải được nội dung trang giới thiệu.")
+        return data
 
-    for key, selector_name in list_selector_mapping.items():
-        try:
-            data[key] = _collect_texts_from_selector(driver, selector_name, timeout=timeout)
-        except Exception as exc:
-            logger.warning(f"[PROFILE] Lỗi lấy introduction.{key} từ {selector_name}: {exc}")
+    try:
+        data["personal_info"] = _get_section_items(driver, "Thông tin cá nhân")
+        logger.info(f"[PAGE] Tìm thấy {len(data['personal_info'])} item trong section thông tin cá nhân.")
+    except Exception as exc:
+        logger.debug(f"[PAGE] Lỗi khi lấy mục 'Thông tin cá nhân': {exc}")
 
-    for key, selector_name in scalar_selector_mapping.items():
-        try:
-            texts = _collect_texts_from_selector(driver, selector_name, timeout=timeout)
-            if texts:
-                data[key] = texts[0]
-        except Exception as exc:
-            logger.warning(f"[PROFILE] Lỗi lấy introduction.{key} từ {selector_name}: {exc}")
+    try:
+        data["contact_info"] = _get_section_items(driver, "Thông tin liên hệ")
+        logger.info(f"[PAGE] Tìm thấy {len(data['contact_info'])} item trong section thông tin liên hệ.")
+    except Exception as exc:
+        logger.debug(f"[PAGE] Lỗi khi lấy mục 'Thông tin liên hệ': {exc}")
+
+    if data["personal_info"] or data["contact_info"]:
+        return data
+
+    # Fallback for layouts where the section heading is not accessible.
+    try:
+        items = driver.find_elements(By.CSS_SELECTOR, "div[aria-labelledby] div[role='listitem']")
+        for item in items:
+            clean_text = _clean_section_item_text(item.text)
+            if clean_text and clean_text not in data["personal_info"]:
+                data["personal_info"].append(clean_text)
+        if data["personal_info"]:
+            logger.info(
+                f"[PAGE] Fallback: gom {len(data['personal_info'])} item vào section thông tin cá nhân."
+            )
+    except Exception as exc:
+        logger.debug(f"[PAGE] Lỗi fallback khi lấy thông tin giới thiệu: {exc}")
 
     return data
 
 
+# def _get_profile_introduces(driver, target_url, timeout: int = 5) -> dict:
+#     """Lấy thông tin Giới thiệu và tách theo từng section."""
+#     current_url = driver.current_url
+#     target_about = f"{target_url}/" if "profile.php" not in target_url else f"{target_url}&sk=about"
+    
+#     if target_about not in current_url:
+#         driver.get(target_about)
+#         time.sleep(3)
+
+#     logger.info("[PAGE] Đang quét thông tin Giới thiệu Fanpage...")
+#     return _extract_intro_sections(driver, timeout=timeout)
+
+def get_profile_introduces(driver, target_url, timeout: int = 5) -> dict:
+    """Lấy thông tin giới thiệu từ trang chủ và tách theo từng section."""
+    current_url = driver.current_url
+    target_home = target_url.rstrip("/")
+    
+    if target_home not in current_url:
+        driver.get(target_home)
+        time.sleep(3)
+
+    logger.info("[PAGE] Đang quét thông tin Giới thiệu Profile...")
+    return _extract_intro_sections(driver, timeout=timeout)
 # ==========================================
 # 4. PHOTOS (Ảnh)
 # ==========================================
@@ -449,7 +500,81 @@ def get_profile_pictures(driver, target_url, timeout: int = 20) -> list:
 
     return list(set(image_urls))
 
+def get_profile_high_res_pictures(
+    driver,
+    target_url,
+    timeout=5,
+    max_photos=None,
+    scroll_until_stable_cfg: Dict[str, Any] | None = None,
+):
+    high_res_images = []
+    photos_url = f"{target_url}/photos" if "profile.php" not in target_url else f"{target_url}&sk=photos"
 
+    driver.get(photos_url)
+    time.sleep(3)
+
+    scroll_until_stable(
+        driver,
+        get_progress_count=lambda: _count_unique_selector_values(
+            driver,
+            "profile.photos.link",
+            attr="href",
+        ),
+        log_prefix="[PROFILE][PHOTOS]",
+        config=scroll_until_stable_cfg,
+        defaults={
+            "max_scrolls": 80,
+            "stable_rounds": 3,
+            "scroll_pause_seconds": 2.0,
+            "settle_pause_seconds": 0.5,
+        },
+    )
+
+    photo_links = set()
+    photo_elements = _find_elements_by_selector(driver, "profile.photos.link", timeout=timeout)
+
+    for el in photo_elements:
+        href = el.get_attribute("href")
+        if href:
+            photo_links.add(href)
+
+    photo_links = list(photo_links)
+    if max_photos:
+        photo_links = photo_links[:max_photos]
+
+    for link in photo_links:
+        try:
+            driver.get(link)
+            time.sleep(2)
+
+            imgs = _find_elements_by_selector(driver, "profile.photos.highres_img", timeout=timeout)
+            if not imgs:
+                raise TimeoutException("high resolution image not found")
+
+            max_img = None
+            max_area = 0
+
+            for img in imgs:
+                try:
+                    width = int(img.get_attribute("naturalWidth") or 0)
+                    height = int(img.get_attribute("naturalHeight") or 0)
+                    if width * height > max_area:
+                        max_area = width * height
+                        max_img = img
+                except Exception:
+                    continue
+
+            if max_img:
+                src = max_img.get_attribute("src")
+                if src:
+                    high_res_images.append(src)
+
+            time.sleep(1.5)
+
+        except Exception:
+            continue
+
+    return list(set(high_res_images))
 # ==========================================
 # 5. FRIENDS (Bạn bè)
 # ==========================================
@@ -532,7 +657,6 @@ def get_profile_friends(
 
     return friends_list
 
-
 # ==========================================
 # MAIN ORCHESTRATOR
 # ==========================================
@@ -604,80 +728,3 @@ def scrape_full_profile_info(
         logger.error(f"[PROFILE] Không thể lưu file: {save_err}")
 
     return full_data
-
-
-def get_profile_high_res_pictures(
-    driver,
-    target_url,
-    timeout=5,
-    max_photos=None,
-    scroll_until_stable_cfg: Dict[str, Any] | None = None,
-):
-    high_res_images = []
-    photos_url = f"{target_url}/photos" if "profile.php" not in target_url else f"{target_url}&sk=photos"
-
-    driver.get(photos_url)
-    time.sleep(3)
-
-    scroll_until_stable(
-        driver,
-        get_progress_count=lambda: _count_unique_selector_values(
-            driver,
-            "profile.photos.link",
-            attr="href",
-        ),
-        log_prefix="[PROFILE][PHOTOS]",
-        config=scroll_until_stable_cfg,
-        defaults={
-            "max_scrolls": 80,
-            "stable_rounds": 3,
-            "scroll_pause_seconds": 2.0,
-            "settle_pause_seconds": 0.5,
-        },
-    )
-
-    photo_links = set()
-    photo_elements = _find_elements_by_selector(driver, "profile.photos.link", timeout=timeout)
-
-    for el in photo_elements:
-        href = el.get_attribute("href")
-        if href:
-            photo_links.add(href)
-
-    photo_links = list(photo_links)
-    if max_photos:
-        photo_links = photo_links[:max_photos]
-
-    for link in photo_links:
-        try:
-            driver.get(link)
-            time.sleep(2)
-
-            imgs = _find_elements_by_selector(driver, "profile.photos.highres_img", timeout=timeout)
-            if not imgs:
-                raise TimeoutException("high resolution image not found")
-
-            max_img = None
-            max_area = 0
-
-            for img in imgs:
-                try:
-                    width = int(img.get_attribute("naturalWidth") or 0)
-                    height = int(img.get_attribute("naturalHeight") or 0)
-                    if width * height > max_area:
-                        max_area = width * height
-                        max_img = img
-                except Exception:
-                    continue
-
-            if max_img:
-                src = max_img.get_attribute("src")
-                if src:
-                    high_res_images.append(src)
-
-            time.sleep(1.5)
-
-        except Exception:
-            continue
-
-    return list(set(high_res_images))

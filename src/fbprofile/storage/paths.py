@@ -15,5 +15,6 @@ def compute_paths(data_root: Path, page_name: str, account_tag: str):
     base.mkdir(parents=True, exist_ok=True)
     raw_dump_dir.mkdir(parents=True, exist_ok=True)
     out_ndjson.parent.mkdir(parents=True, exist_ok=True)
+    out_ndjson.touch(exist_ok=True)
     print(f"--- BẮT ĐẦU QUÉT PROFILE: {page_name} ---")
     return base, out_ndjson, raw_dump_dir, checkpoint
