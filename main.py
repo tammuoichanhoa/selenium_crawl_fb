@@ -15,7 +15,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from scripts.crawler import crawl_urls_batch, _normalize_selector_modules
-from scripts.dequeue_task import run_curl
+from scripts.dequeue_task import run_request
 from src.utils import (
     build_port_queue,
     build_service_url,
@@ -46,11 +46,13 @@ from src.utils.task_flow import (
     parse_dequeue_payload,
     post_event,
     precheck_facebook_uid,
+    post_type_clone_event,
+    infer_fb_type_from_url,
 )
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_EVENTS_URL = "https://anticipated-andrea-search-laser.trycloudflare.com/events"
+DEFAULT_EVENTS_URL = load_env_file(".env").get("EVENTS_URL")
 # DEFAULT_ACCOUNT_COOKIES_FILE = "V1CM69c1f0b094cbc.txt"
 
 
@@ -270,15 +272,15 @@ def main() -> int:
             logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
             return 2
 
-        result = run_curl(args.api_key)
-        if result.returncode != 0:
+        result = run_request(args.api_key)
+        if result.status_code != 200:
             logger.error("Dequeue request failed: %s", result.stderr.strip())
             return result.returncode
 
-        payload = parse_dequeue_payload(result.stdout or "")
+        payload = parse_dequeue_payload(result.json())
         # print("payload>>>>>>>>>", payload)
         items = extract_items(payload)
-        print("Items from payload: ", items)
+        # print("Items from payload: ", items)
 
     if not items:
         logger.info("Queue is empty or contains no valid tasks. Exiting safely.")
@@ -304,7 +306,7 @@ def main() -> int:
         item["_index"] = index
         account_uid = extract_account_uid(item)
         account_cookie = extract_account_cookie(item, account_cookies)
-        print("Account Info: ", account_uid, account_cookie)
+        # print("Account Info: ", account_uid, account_cookie)
         if account_uid and not account_cookie:
             logger.warning(
                 "[account] No cookies found for account uid=%s; falling back to .env COOKIES.",
@@ -341,6 +343,25 @@ def main() -> int:
             valid_items: List[Dict[str, Any]] = []
             for item in module_items:
                 uid = item.get("uid")
+                
+                actual_type = infer_fb_type_from_url(uid)
+                login_cfg = config.get("login", {})
+                global_login_method = (env.get("LOGIN_METHOD") or login_cfg.get("method") or "cookies").strip().lower()
+                is_anon = args.anonymous or global_login_method == "anonymous"
+                if is_anon and actual_type == "profile":
+                    logger.warning("[type_clone] Anonymous mode cannot crawl profile. Recalling task: %s", uid)
+                    indexed_results[item["_index"]] = {
+                        "task_id": item.get("task_id"),
+                        "uid": uid,
+                        "social_type": item.get("social_type"),
+                        "crawl_types": item.get("crawl_types"),
+                        "selector_module": item.get("selector_module"),
+                        "result": { "error": "skipped_type_mismatch_profile" },
+                        "needs_type_clone": True,
+                        "detected_crawl_type": "profile"
+                    }
+                    continue
+
                 if precheck_enabled and isinstance(uid, str):
                     status, reason, checked_url = precheck_facebook_uid(
                         uid,
@@ -400,16 +421,38 @@ def main() -> int:
     }
 
     output_json = json.dumps(output, ensure_ascii=False, indent=2)
-    print(output_json)
+    # print(output_json)
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as file:
             file.write(output_json)
 
+    node_id = env.get("NODE_ID", "default-node")
     for item in response_items:
         task_id = item.get("task_id")
         result_payload = item.get("result")
-        if task_id and isinstance(result_payload, dict):
+        
+        if not task_id:
+            continue
+            
+        if item.get("needs_type_clone"):
+            logger.warning("[event] needs_type_clone for task_id=%s: %s", task_id, result_payload)
+            post_type_clone_event(
+                args.api_key, events_url, str(task_id),
+                detected_crawl_type=item.get("detected_crawl_type", "profile"),
+                result=result_payload,
+                reason="Anonymous mode strictly restricted from crawling personal profiles",
+                node_id=node_id
+            )
+            continue
+            
+        elif result_payload and (result_payload.get("needs_account_error") or "login_required" in result_payload.get("error", "")):
+            logger.warning("[event] needs_account_error for task_id=%s: %s", task_id, result_payload)
+            post_event(args.api_key, events_url, str(task_id), result_payload, event_type="report", needs_account=True)
+            continue
+
+        if isinstance(result_payload, dict):
+            logger.warning("[event] Complete for task_id=%s: %s", task_id, result_payload)
             post_event(args.api_key, events_url, str(task_id), result_payload)
         else:
             logger.warning("[event] Skipped invalid event payload for item: %s", item)

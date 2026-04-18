@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import requests
 import os
 import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
-
-DEFAULT_DEQUEUE_URL = (
-    "https://latex-card-walk-donor.trycloudflare.com/"
-    "tasks/dequeue?social_type=facebook&version=1.0"
-)
+from src.utils import load_env_file
+DEFAULT_DEQUEUE_URL = load_env_file(".env").get("DEQUEUE_URL", "https://latex-card-walk-donor.trycloudflare.com/tasks/dequeue?social_type=facebook&version=1.0")
 
 
 def _load_env_value(key: str, default: str = "") -> str:
@@ -50,24 +48,24 @@ def _build_service_url(
     return fallback
 
 
-def run_curl(api_key: str) -> subprocess.CompletedProcess:
-    url = _build_service_url(
-        path="/tasks/dequeue?social_type=facebook&version=1.0",
-        explicit_key="DEQUEUE_URL",
-        fallback=DEFAULT_DEQUEUE_URL,
-    )
-    cmd = [
-        "curl",
-        "-sS",
-        "-X",
-        "GET",
-        url,
-        "-H",
-        "accept: application/json",
-        "-H",
-        f"Authorization: Bearer {api_key}",
-    ]
-    return subprocess.run(cmd, capture_output=True, text=True)
+def run_request(api_key: str):
+    # nếu bạn muốn override như code cũ
+    url = DEFAULT_DEQUEUE_URL
+    headers = {
+        "accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+
+        # raise exception nếu status != 200
+        response.raise_for_status()
+        return response  # hoặc response.json()
+    
+    except requests.exceptions.RequestException as e:
+        print(f"Request error: {e}")
+        return None
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -89,7 +87,7 @@ def main() -> int:
         print("Missing API key. Provide --api-key or set API_KEY env var.", file=sys.stderr)
         return 2
 
-    result = run_curl(args.api_key)
+    result = run_request(args.api_key)
 
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     header = (

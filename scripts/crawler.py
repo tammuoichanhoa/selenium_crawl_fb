@@ -279,6 +279,18 @@ def crawl_urls_batch(
             if not str(url).startswith("http"):
                 url = f"https://www.facebook.com/{url}"
             try:
+                from src.utils.task_flow import precheck_facebook_uid
+                status, reason, checked_url = precheck_facebook_uid(
+                    url, timeout=5.0, user_agent=user_agent
+                )
+                logger.info("[worker %s] Precheck status for %s: %s (reason: %s)", worker_id, url, status, reason)
+                if status in ("invalid", "blocked", "not_found"):
+                    logger.warning("[worker %s] Skip %s due to %s: %s", worker_id, url, status, reason)
+                    raise RuntimeError(f"precheck_{status}: {reason}")
+                if status == "restricted" and login_method == "anonymous":
+                    logger.warning("[worker %s] Skip %s because anonymous mode cannot view restricted page", worker_id, url)
+                    raise RuntimeError(f"precheck_{status}: login_required")
+                
                 url_name = str(url).split('/')[-1].split('?')[0]
                 if not url_name: url_name = str(url)
                 
@@ -313,6 +325,7 @@ def crawl_urls_batch(
                         resolved_entity_type,
                     )
 
+                profile_data = None
                 if resolved_entity_type == "profile":
                     profile_data = scrape_full_profile_info(
                         driver,
@@ -379,13 +392,28 @@ def crawl_urls_batch(
                 if ts_state["latest"] is not None:
                     save_checkpoint(checkpoint, ts_state["latest"])
 
-                # profile_data = {}
-                # if profile_info_path.exists():
-                #     try:
-                #         import json
-                #         with open(profile_info_path, "r", encoding="utf-8") as f:
-                #             profile_data = json.load(f)
-                #     except: pass
+                if resolved_entity_type == "page" and page_info_path.exists():
+                    try:
+                        import json
+                        from src.utils.task_flow import parse_follower_count
+                        with open(page_info_path, "r", encoding="utf-8") as f:
+                            saved_page_data = json.load(f)
+                        raw_f = saved_page_data.get("basic_info", {}).get("followers", "0")
+                        total_f = parse_follower_count(raw_f)
+                        scraped_f = len(saved_page_data.get("followers_list", []))
+                        
+                        diff_pct = int(os.environ.get("FOLLOWER_DIFF_PERCENT", "20"))
+                        if total_f > 0:
+                            required_f = int(total_f * (100 - diff_pct) / 100)
+                            if scraped_f < required_f:
+                                if not (total_f > 10000 and scraped_f > 5000):
+                                    page_data["needs_account_error"] = True
+                                    logger.warning(
+                                        "[worker %s] needs_account: scraped followers (%s) < required (%s) for %s", 
+                                        worker_id, scraped_f, required_f, url
+                                    )
+                    except Exception as parse_e:
+                        logger.warning("[worker %s] Failed checking follower gap: %s", worker_id, parse_e)
                 
                 posts_data = []
                 if out_ndjson.exists():
