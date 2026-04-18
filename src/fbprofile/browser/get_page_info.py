@@ -5,8 +5,8 @@ from typing import Any, Dict
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
-
+from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import NoSuchElementException
 # Import logger từ hệ thống log hiện tại
 from logs.loging_config import logger
 from .stable_scroll import scroll_until_stable
@@ -391,33 +391,52 @@ def get_page_followers(
 
         logger.info("[PAGE] Đang trích xuất dữ liệu người theo dõi...")
         info_divs = driver.find_elements(By.XPATH, "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]")
-
-        for info in info_divs:
+        info_divs_html = [info.get_attribute('outerHTML') for info in info_divs]
+        with open("info_divs_html.txt", "w", encoding="utf-8") as f:
+            f.write(str(info_divs_html))
+        for info in info_divs_html:
             try:
-                follower_data = {"name": None, "page_url": None, "avatar_url": None, "subtitle": ""}
+                follower_data = {"name": "", "page_url": "", "avatar_url": "", "subtitle": ""}
                 
-                # Tên & Link
+                # 1. Tên & Link
                 try:
                     link_element = info.find_element(By.XPATH, ".//a[@role='link']")
-                    follower_data["name"] = link_element.text.strip()
+                    # Dùng textContent hoặc innerText để lấy dữ liệu kể cả khi element bị khuất khỏi màn hình
+                    raw_name = link_element.get_attribute("textContent") 
+                    follower_data["name"] = raw_name.strip() if raw_name else ""
                     follower_data["page_url"] = link_element.get_attribute("href")
-                except: continue
+                except NoSuchElementException:
+                    # Nếu không có link, có thể div này không phải là user, bỏ qua luôn
+                    continue
 
-                # Subtitle (nếu có, ví dụ "Có 10 chung")
+                # Nếu không lấy được tên, bỏ qua để tránh rác dữ liệu
+                if not follower_data["name"]:
+                    continue
+
+                # 2. Subtitle
                 try:
                     sub_el = info.find_element(By.XPATH, ".//div[contains(@class, 'x1gslohp')]")
-                    follower_data["subtitle"] = sub_el.text.strip()
-                except: pass
+                    raw_sub = sub_el.get_attribute("textContent")
+                    follower_data["subtitle"] = raw_sub.strip() if raw_sub else ""
+                except NoSuchElementException:
+                    pass
 
-                # Avatar
+                # 3. Avatar (Nên cân nhắc đổi XPath này nếu info là thẻ bao ngoài cùng)
                 try:
-                    avt_el = info.find_element(By.XPATH, "./preceding-sibling::div//img")
+                    # Ưu tiên tìm thẻ img ngay bên trong wrapper của người đó, thay vì dùng sibling
+                    # Nếu 'info' chỉ chứa text, XPath của bạn: "./preceding-sibling::div//img"
+                    avt_el = info.find_element(By.XPATH, "./preceding-sibling::div//img") 
                     follower_data["avatar_url"] = avt_el.get_attribute("src")
-                except: pass
+                except NoSuchElementException:
+                    pass
 
-                if follower_data["name"]:
-                    followers_list.append(follower_data)
-            except: continue
+                # Lưu lại kết quả
+                followers_list.append(follower_data)
+                logger.info(f"[PAGE] Đã trích xuất thành công: {follower_data['name']}")
+
+            except Exception as e:
+                logger.warning(f"Lỗi không xác định khi parse HTML 1 user: {e}")
+                continue
 
     except Exception as e:
         logger.error(f"[PAGE] Lỗi lấy người theo dõi: {str(e)}")

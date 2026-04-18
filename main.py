@@ -452,7 +452,7 @@ def main() -> int:
             continue
 
         if isinstance(result_payload, dict):
-            logger.warning("[event] Complete for task_id=%s: %s", task_id, result_payload)
+            logger.warning("[event] Complete for task_id=%s: %s", task_id)
             post_event(args.api_key, events_url, str(task_id), result_payload)
         else:
             logger.warning("[event] Skipped invalid event payload for item: %s", item)

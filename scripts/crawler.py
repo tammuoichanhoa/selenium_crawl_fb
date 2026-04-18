@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 import datetime
 from pathlib import Path
 import traceback
+from urllib.parse import urlparse, urlunparse
 from selenium.webdriver.common.by import By
 
 from src.fbprofile.storage.paths import compute_paths
@@ -50,6 +51,29 @@ DEFAULT_CONFIG_PATH = os.path.join("configs", "base.json")
 DEFAULT_PAGES_FILE = "pages.txt"
 logger = logging.getLogger(__name__)
 
+DEFAULT_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; SM-G991B) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Mobile Safari/537.36"
+)
+MOBILE_MORE_CONTENT_MARKERS = (
+    "còn nhiều nội dung khác đáng xem",
+    "còn nhiều nội dung khác",
+    "xem thêm ảnh, video",
+    "more content to see",
+    "see more photos",
+)
+MOBILE_LOGIN_MARKERS = (
+    "đăng nhập",
+    "log in",
+    "login",
+)
+MOBILE_SIGNUP_MARKERS = (
+    "tạo tài khoản mới",
+    "create new account",
+    "sign up",
+)
+
 '''
     Nhiệm vụ: vào 1 URL và trích dữ liệu.
 
@@ -80,6 +104,169 @@ def _has_add_friend_button(driver) -> bool:
 
 def _detect_entity_type_from_dom(driver) -> str:
     return "profile" if _has_add_friend_button(driver) else "page"
+
+
+def _to_mobile_facebook_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return "https://m.facebook.com/"
+    if "://" not in raw:
+        raw = f"https://www.facebook.com/{raw.lstrip('/')}"
+
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return f"https://m.facebook.com/{raw.lstrip('/')}"
+
+    return urlunparse(parsed._replace(scheme=parsed.scheme or "https", netloc="m.facebook.com"))
+
+
+def _get_current_user_agent(driver) -> str | None:
+    try:
+        value = driver.execute_script("return navigator.userAgent || '';")
+    except Exception:
+        return None
+    return str(value).strip() if value else None
+
+
+def _apply_mobile_browser_profile(driver, mobile_user_agent: str) -> None:
+    driver.execute_cdp_cmd("Network.enable", {})
+    driver.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {
+            "userAgent": mobile_user_agent,
+            "acceptLanguage": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "platform": "Android",
+        },
+    )
+    driver.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": 360,
+            "height": 800,
+            "deviceScaleFactor": 2,
+            "mobile": True,
+        },
+    )
+    driver.execute_cdp_cmd(
+        "Emulation.setTouchEmulationEnabled",
+        {
+            "enabled": True,
+            "maxTouchPoints": 1,
+        },
+    )
+
+
+def _restore_browser_profile(driver, original_user_agent: str | None) -> None:
+    try:
+        driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setTouchEmulationEnabled",
+            {"enabled": False},
+        )
+    except Exception:
+        pass
+    if original_user_agent:
+        try:
+            driver.execute_cdp_cmd(
+                "Network.setUserAgentOverride",
+                {"userAgent": original_user_agent},
+            )
+        except Exception:
+            pass
+
+
+def _page_has_mobile_more_content_prompt(driver) -> bool:
+    try:
+        text = driver.execute_script(
+            "return document.body ? document.body.innerText : '';"
+        ) or ""
+        aria_text = driver.execute_script(
+            """
+            return Array.from(document.querySelectorAll('[aria-label]'))
+              .map(el => el.getAttribute('aria-label') || '')
+              .join('\\n');
+            """
+        ) or ""
+    except Exception:
+        return False
+
+    combined = " ".join(str(value) for value in (text, aria_text)).lower()
+    combined = " ".join(combined.split())
+    has_more_content = any(marker in combined for marker in MOBILE_MORE_CONTENT_MARKERS)
+    has_login = any(marker in combined for marker in MOBILE_LOGIN_MARKERS)
+    has_signup = any(marker in combined for marker in MOBILE_SIGNUP_MARKERS)
+    return has_more_content and (has_login or has_signup)
+
+
+def _check_mobile_more_content_after_scroll(
+    driver,
+    page_url: str,
+    *,
+    wait_after_load: int,
+    original_user_agent: str | None = None,
+    mobile_user_agent: str = DEFAULT_MOBILE_USER_AGENT,
+    max_scrolls: int = 60,
+    stable_rounds: int = 4,
+    pause_seconds: float = 1.2,
+) -> bool:
+    mobile_url = _to_mobile_facebook_url(page_url)
+    desktop_user_agent = original_user_agent or _get_current_user_agent(driver)
+    try:
+        _apply_mobile_browser_profile(driver, mobile_user_agent)
+        logger.info(
+            "[mobile-check] Visiting %s with mobile user-agent: %s",
+            mobile_url,
+            mobile_user_agent,
+        )
+        driver.get(mobile_url)
+        wait_for_page_ready(driver, 20)
+        wait_for_seconds(driver, wait_after_load)
+
+        prev_height = 0
+        stable_count = 0
+        for scroll_index in range(max_scrolls):
+            if _page_has_mobile_more_content_prompt(driver):
+                logger.info(
+                    "[mobile-check] Login prompt with more-content marker found after %d scroll(s).",
+                    scroll_index,
+                )
+                return True
+
+            try:
+                height = int(driver.execute_script("return document.body.scrollHeight || 0;") or 0)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            except Exception as exc:
+                logger.warning("[mobile-check] Scroll failed on %s: %s", mobile_url, exc)
+                return False
+
+            wait_for_seconds(driver, pause_seconds)
+            try:
+                current_height = int(driver.execute_script("return document.body.scrollHeight || 0;") or 0)
+            except Exception:
+                current_height = height
+
+            if current_height <= prev_height:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            logger.info(
+                "[mobile-check] scroll=%d height=%d stable=%d/%d",
+                scroll_index,
+                current_height,
+                stable_count,
+                stable_rounds,
+            )
+            prev_height = current_height
+            if stable_count >= stable_rounds:
+                break
+
+        return _page_has_mobile_more_content_prompt(driver)
+    finally:
+        _restore_browser_profile(driver, desktop_user_agent)
 
 
 def crawl_page(
@@ -368,7 +555,7 @@ def crawl_urls_batch(
                     selector_debug_cfg_profile,
                     selector_debug_cfg_page,
                 )
-                target_date = datetime.date.today()
+                target_date = datetime.datetime(2025, 1, 1)
                 if "group" not in url:
                     try:
                         go_to_date(driver, target_date)
@@ -392,7 +579,28 @@ def crawl_urls_batch(
                 if ts_state["latest"] is not None:
                     save_checkpoint(checkpoint, ts_state["latest"])
 
-                if resolved_entity_type == "page" and page_info_path.exists():
+                if resolved_entity_type == "page" and login_method == "anonymous":
+                    try:
+                        if _check_mobile_more_content_after_scroll(
+                            driver,
+                            url,
+                            wait_after_load=wait_after_load,
+                            original_user_agent=user_agent,
+                        ):
+                            page_data["needs_account_error"] = True
+                            page_data["needs_account_reason"] = "mobile_more_content_login_prompt"
+                            logger.warning(
+                                "[worker %s] needs_account: mobile page still shows more-content login prompt for %s",
+                                worker_id,
+                                url,
+                            )
+                    except Exception as mobile_check_e:
+                        logger.warning(
+                            "[worker %s] Failed checking mobile more-content prompt: %s",
+                            worker_id,
+                            mobile_check_e,
+                        )
+                elif resolved_entity_type == "page" and page_info_path.exists():
                     try:
                         import json
                         from src.utils.task_flow import parse_follower_count
