@@ -32,7 +32,10 @@ def parse_dequeue_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def derive_step_status(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def derive_step_status(
+    result: Dict[str, Any] | None,
+    status_progress: str | None = None,
+) -> Dict[str, Dict[str, Any]]:
     login_ok = True
     open_link_ok = True
     fetch_info_ok = True
@@ -46,10 +49,22 @@ def derive_step_status(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         else:
             open_link_ok = False
 
+    open_link: Dict[str, Any] = {"ok": open_link_ok}
+    if isinstance(result, dict):
+        final_url = result.get("final_url") or result.get("url")
+        if final_url:
+            open_link["final_url"] = final_url
+
+    fetch_info: Dict[str, Any] = {
+        "ok": fetch_info_ok,
+        "status_progress": status_progress,
+        "data": result,
+    }
+
     return {
         "login": {"ok": login_ok},
-        "open_link": {"ok": open_link_ok},
-        "fetch_info": {"ok": fetch_info_ok, "data": result},
+        "open_link": open_link,
+        "fetch_info": fetch_info,
     }
 
 
@@ -59,7 +74,8 @@ def post_event(
     task_id: str, 
     result: Dict[str, Any] | None = None,
     event_type: str = "complete",
-    needs_account: bool = False
+    needs_account: bool = False,
+    status_progress: str | None = None,
 ) -> None:
     payload = {
         "task_id": task_id,
@@ -68,11 +84,23 @@ def post_event(
     }
     
     if event_type == "complete" and result is not None:
-        payload["payload"]["steps"] = derive_step_status(result)
+        payload["payload"]["steps"] = derive_step_status(
+            result,
+            status_progress=None,
+        )
     elif event_type == "report":
         payload["payload"]["needs_account"] = needs_account
-        if result is not None:
-            payload["payload"]["steps"] = derive_step_status(result)
+        resolved_status_progress = status_progress
+        if resolved_status_progress is None and isinstance(result, dict):
+            raw_status_progress = result.get("status_progress")
+            if raw_status_progress is not None:
+                resolved_status_progress = str(raw_status_progress)
+        if resolved_status_progress is None:
+            resolved_status_progress = "needs_account" if needs_account else "running"
+        payload["payload"]["steps"] = derive_step_status(
+            result,
+            status_progress=resolved_status_progress,
+        )
 
     headers = {
         "Content-Type": "application/json",

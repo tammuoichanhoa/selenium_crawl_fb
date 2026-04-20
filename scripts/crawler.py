@@ -51,6 +51,12 @@ DEFAULT_CONFIG_PATH = os.path.join("configs", "base.json")
 DEFAULT_PAGES_FILE = "pages.txt"
 logger = logging.getLogger(__name__)
 
+GO_TO_DATE_FIELD_NAMES = (
+    "date",
+    "target_date",
+    "go_to_date",
+    "crawl_date",
+)
 DEFAULT_MOBILE_USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 13; SM-G991B) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -104,6 +110,110 @@ def _has_add_friend_button(driver) -> bool:
 
 def _detect_entity_type_from_dom(driver) -> str:
     return "profile" if _has_add_friend_button(driver) else "page"
+
+
+def parse_go_to_date(value: Any) -> datetime.date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        return datetime.datetime.fromtimestamp(timestamp).date()
+
+    raw = str(value).strip()
+    if not raw or raw.lower() in {"none", "null", "false"}:
+        return None
+
+    try:
+        return datetime.date.fromisoformat(raw)
+    except ValueError:
+        pass
+
+    iso_candidate = raw.replace("Z", "+00:00")
+    try:
+        return datetime.datetime.fromisoformat(iso_candidate).date()
+    except ValueError:
+        pass
+
+    for fmt in ("%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y", "%Y%m%d"):
+        try:
+            return datetime.datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"Invalid date value {value!r}. Use YYYY-MM-DD, for example 2025-01-01."
+    )
+
+
+def extract_go_to_date_value(item: Dict[str, Any]) -> Any:
+    cursor = item.get("cursor")
+    if isinstance(cursor, dict) and has_cursor_rid(item):
+        cursor_created_time = cursor.get("created_time")
+        if cursor_created_time not in (None, ""):
+            return cursor_created_time
+
+    for key in GO_TO_DATE_FIELD_NAMES:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+
+    for container_key in ("payload", "params", "metadata"):
+        container = item.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in GO_TO_DATE_FIELD_NAMES:
+            value = container.get(key)
+            if value not in (None, ""):
+                return value
+
+    return None
+
+
+def has_cursor_rid(item: Dict[str, Any]) -> bool:
+    cursor = item.get("cursor")
+    if not isinstance(cursor, dict):
+        return False
+    rid = cursor.get("rid")
+    return isinstance(rid, str) and bool(rid.strip())
+
+
+def _unpack_crawl_target(crawl_target: Any) -> Tuple[str, str | None, datetime.date | None]:
+    if isinstance(crawl_target, dict):
+        uid_or_url = crawl_target.get("uid") or crawl_target.get("url")
+        requested_entity_type = crawl_target.get("selector_module") or crawl_target.get("entity_type")
+        go_to_date_value = extract_go_to_date_value(crawl_target)
+    elif isinstance(crawl_target, (tuple, list)):
+        uid_or_url = crawl_target[0] if len(crawl_target) > 0 else None
+        requested_entity_type = crawl_target[1] if len(crawl_target) > 1 else None
+        go_to_date_value = crawl_target[2] if len(crawl_target) > 2 else None
+    else:
+        uid_or_url = crawl_target
+        requested_entity_type = None
+        go_to_date_value = None
+
+    if not isinstance(uid_or_url, str) or not uid_or_url.strip():
+        raise ValueError(f"Invalid crawl target: {crawl_target!r}")
+
+    if requested_entity_type is not None:
+        requested_entity_type = str(requested_entity_type).strip() or None
+
+    return uid_or_url.strip(), requested_entity_type, parse_go_to_date(go_to_date_value)
+
+
+def _crawl_target_url_for_error(crawl_target: Any) -> str:
+    if isinstance(crawl_target, dict):
+        value = crawl_target.get("uid") or crawl_target.get("url")
+    elif isinstance(crawl_target, (tuple, list)):
+        value = crawl_target[0] if crawl_target else None
+    else:
+        value = crawl_target
+    return str(value or "")
 
 
 def _to_mobile_facebook_url(url: str) -> str:
@@ -379,7 +489,7 @@ Giữa các trang, đợi wait_between_pages.
 '''
 def crawl_urls_batch(
     worker_id: int,
-    indexed_urls: List[Tuple[int, Tuple[str, str | None]]],
+    indexed_urls: List[Tuple[int, Any]],
     *,
     selector_module: str | None,
     login_method: str,
@@ -455,13 +565,19 @@ def crawl_urls_batch(
         except Exception as exc:
             logger.error("[worker %s] Login failed: %s", worker_id, exc)
             return [
-                (index, {"url": url, "error": f"login_failed: {exc}"})
-                for index, (url, _) in indexed_urls
+                (
+                    index,
+                    {
+                        "url": _crawl_target_url_for_error(crawl_target),
+                        "error": f"login_failed: {exc}",
+                    },
+                )
+                for index, crawl_target in indexed_urls
             ]
 
         results: List[Tuple[int, Dict[str, Any]]] = []
         for position, (index, crawl_target) in enumerate(indexed_urls):
-            uid_or_url, requested_entity_type = crawl_target
+            uid_or_url, requested_entity_type, target_date = _unpack_crawl_target(crawl_target)
             url = uid_or_url
             if not str(url).startswith("http"):
                 url = f"https://www.facebook.com/{url}"
@@ -513,6 +629,7 @@ def crawl_urls_batch(
                     )
 
                 profile_data = None
+                page_info_data = None
                 if resolved_entity_type == "profile":
                     profile_data = scrape_full_profile_info(
                         driver,
@@ -527,7 +644,7 @@ def crawl_urls_batch(
                         raise RuntimeError(
                             "Missing page scraper: src.fbprofile.browser.get_page_info"
                         ) from exc
-                    page_data = scrape_full_page_info(
+                    page_info_data = scrape_full_page_info(
                         driver,
                         url,
                         page_info_path,
@@ -555,12 +672,14 @@ def crawl_urls_batch(
                     selector_debug_cfg_profile,
                     selector_debug_cfg_page,
                 )
-                target_date = datetime.datetime(2025, 1, 1)
-                if "group" not in url:
+                if target_date and "group" not in url:
                     try:
                         go_to_date(driver, target_date)
+                        page_data["go_to_date"] = target_date.isoformat()
                     except Exception as e:
                         logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
+                elif target_date is None:
+                    logger.info("[worker %s] Skip go_to_date for %s: no date provided", worker_id, url)
 
                 seen_ids = set()
                 ts_state = {"latest": None, "earliest": None}
@@ -606,6 +725,8 @@ def crawl_urls_batch(
                         from src.utils.task_flow import parse_follower_count
                         with open(page_info_path, "r", encoding="utf-8") as f:
                             saved_page_data = json.load(f)
+                        if page_info_data is None:
+                            page_info_data = saved_page_data
                         raw_f = saved_page_data.get("basic_info", {}).get("followers", "0")
                         total_f = parse_follower_count(raw_f)
                         scraped_f = len(saved_page_data.get("followers_list", []))
@@ -635,9 +756,19 @@ def crawl_urls_batch(
                     except Exception as e:
                         logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
 
+                if resolved_entity_type == "page" and page_info_data is None and page_info_path.exists():
+                    try:
+                        with open(page_info_path, "r", encoding="utf-8") as f:
+                            page_info_data = json.load(f)
+                    except Exception as e:
+                        logger.warning("[worker %s] Failed reading page_info payload: %s", worker_id, e)
+
                 page_data["profile_info"] = profile_data
+                if resolved_entity_type == "page":
+                    page_data["page_info"] = page_info_data
                 page_data["posts"] = posts_data
-                page_data["posts_collected"] = len(seen_ids)
+                page_data["posts_collected"] = len(posts_data)
+                page_data["posts_collected_current_run"] = len(seen_ids)
                 page_data["output_ndjson"] = str(out_ndjson)
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
@@ -671,7 +802,18 @@ def main() -> None:
         dest="selector_module",
         help="Selector module to use (overrides env/config).",
     )
+    parser.add_argument(
+        "--date",
+        dest="go_to_date",
+        help="Optional timeline end date for go_to_date, formatted YYYY-MM-DD.",
+    )
     args = parser.parse_args()
+    if args.go_to_date:
+        try:
+            parsed_go_to_date = parse_go_to_date(args.go_to_date)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        args.go_to_date = parsed_go_to_date.isoformat() if parsed_go_to_date else None
     '''
     Load cấu hình crawler
     '''
@@ -884,7 +1026,11 @@ def main() -> None:
         len(profile_dirs),
     )
     indexed_results: Dict[int, Dict[str, Any]] = {}
-    page_batches = split_pages_for_workers(pages, max_workers)
+    page_targets = [
+        (page, selector_module, args.go_to_date)
+        for page in pages
+    ]
+    page_batches = split_pages_for_workers(page_targets, max_workers)
     port_pool_size = int(
         env.get("PORT_POOL_SIZE")
         or login_cfg.get("port_pool_size")

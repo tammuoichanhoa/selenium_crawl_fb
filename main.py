@@ -14,7 +14,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.crawler import crawl_urls_batch, _normalize_selector_modules
+from scripts.crawler import (
+    crawl_urls_batch,
+    extract_go_to_date_value,
+    has_cursor_rid,
+    parse_go_to_date,
+    _normalize_selector_modules,
+)
 from scripts.dequeue_task import run_request
 from src.utils import (
     build_port_queue,
@@ -65,6 +71,7 @@ def _crawl_from_uids(
     cookies_override: str | None = None,
     profile_backup_name: str | None = None,
     login_method_override: str | None = None,
+    go_to_date_override: str | None = None,
 ) -> List[Dict[str, Any]]:
     crawl_cfg = config["crawl"]
     login_cfg = config["login"]
@@ -108,12 +115,18 @@ def _crawl_from_uids(
         else None
     )
 
-    crawl_targets: List[Tuple[str, str | None]] = []
+    override_date = parse_go_to_date(go_to_date_override)
+    crawl_targets: List[Tuple[str, str | None, str | None]] = []
     for item in items:
         uid = item.get("uid")
         if not isinstance(uid, str) or not uid.strip():
             raise ValueError("No valid uid values found in dequeue items.")
-        crawl_targets.append((uid.strip(), item.get("selector_module")))
+        target_date = override_date or parse_go_to_date(extract_go_to_date_value(item))
+        crawl_targets.append((
+            uid.strip(),
+            item.get("selector_module"),
+            target_date.isoformat() if target_date else None,
+        ))
 
     elements_cfg, default_wait_cfg, selector_debug_cfg = build_selector_config(
         config,
@@ -247,7 +260,23 @@ def main() -> int:
         action="store_true",
         help="Run crawler in anonymous (incognito) mode.",
     )
+    parser.add_argument(
+        "--date",
+        dest="go_to_date",
+        help=(
+            "Optional timeline end date for go_to_date, formatted YYYY-MM-DD. "
+            "Overrides date fields from dequeue items."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.go_to_date:
+        try:
+            parsed_go_to_date = parse_go_to_date(args.go_to_date)
+        except ValueError as exc:
+            logger.error(str(exc))
+            return 2
+        args.go_to_date = parsed_go_to_date.isoformat() if parsed_go_to_date else None
 
     env = load_env_file(".env")
     if not args.api_key:
@@ -266,6 +295,7 @@ def main() -> int:
             "uid": args.test_uid,
             "social_type": "facebook",
             "crawl_types": ["page"],
+            "date": args.go_to_date,
         }]
     else:
         if not args.api_key:
@@ -333,13 +363,22 @@ def main() -> int:
     indexed_results: Dict[int, Dict[str, Any]] = {}
     for group in grouped_items.values():
         group_items = group["items"]
-        module_buckets: Dict[str | None, List[Dict[str, Any]]] = {}
+        module_buckets: Dict[Tuple[str | None, str | None], List[Dict[str, Any]]] = {}
         for item in group_items:
             inferred = infer_module_for_item(item, selector_modules, None)
             item["selector_module"] = inferred
-            module_buckets.setdefault(inferred, []).append(item)
+            login_method_for_item = "profile" if has_cursor_rid(item) else ("anonymous" if args.anonymous else None)
+            if login_method_for_item == "profile":
+                cursor = item.get("cursor") if isinstance(item.get("cursor"), dict) else {}
+                logger.info(
+                    "[cursor] task_id=%s has cursor.rid=%s created_time=%s; forcing LOGIN_METHOD=profile",
+                    item.get("task_id"),
+                    cursor.get("rid"),
+                    cursor.get("created_time"),
+                )
+            module_buckets.setdefault((inferred, login_method_for_item), []).append(item)
 
-        for module, module_items in module_buckets.items():
+        for (module, login_method_for_bucket), module_items in module_buckets.items():
             valid_items: List[Dict[str, Any]] = []
             for item in module_items:
                 uid = item.get("uid")
@@ -347,7 +386,8 @@ def main() -> int:
                 actual_type = infer_fb_type_from_url(uid)
                 login_cfg = config.get("login", {})
                 global_login_method = (env.get("LOGIN_METHOD") or login_cfg.get("method") or "cookies").strip().lower()
-                is_anon = args.anonymous or global_login_method == "anonymous"
+                effective_login_method = login_method_for_bucket or global_login_method
+                is_anon = effective_login_method == "anonymous"
                 if is_anon and actual_type == "profile":
                     logger.warning("[type_clone] Anonymous mode cannot crawl profile. Recalling task: %s", uid)
                     indexed_results[item["_index"]] = {
@@ -398,7 +438,8 @@ def main() -> int:
                 max_workers_override=args.max_workers,
                 cookies_override=group.get("cookies"),
                 profile_backup_name=group.get("account_uid"),
-                login_method_override="anonymous" if args.anonymous else None,
+                login_method_override=login_method_for_bucket,
+                go_to_date_override=args.go_to_date,
             )
             for item, result in zip(valid_items, results):
                 indexed_results[item["_index"]] = {
@@ -406,6 +447,7 @@ def main() -> int:
                     "uid": item.get("uid"),
                     "social_type": item.get("social_type"),
                     "crawl_types": item.get("crawl_types"),
+                    "cursor": item.get("cursor"),
                     "selector_module": item.get("selector_module"),
                     "result": result,
                 }
@@ -431,7 +473,8 @@ def main() -> int:
     for item in response_items:
         task_id = item.get("task_id")
         result_payload = item.get("result")
-        
+        with open("last_result_payload.json", "w", encoding="utf-8") as f:
+            json.dump(result_payload, f, ensure_ascii=False, indent=2)
         if not task_id:
             continue
             
@@ -448,11 +491,29 @@ def main() -> int:
             
         elif result_payload and (result_payload.get("needs_account_error") or "login_required" in result_payload.get("error", "")):
             logger.warning("[event] needs_account_error for task_id=%s: %s", task_id, result_payload)
-            post_event(args.api_key, events_url, str(task_id), result_payload, event_type="report", needs_account=True)
+            status_progress = (
+                result_payload.get("status_progress")
+                or result_payload.get("needs_account_reason")
+            )
+            if not status_progress:
+                status_progress = (
+                    "login_required"
+                    if "login_required" in result_payload.get("error", "")
+                    else "needs_account"
+                )
+            post_event(
+                args.api_key,
+                events_url,
+                str(task_id),
+                result_payload,
+                event_type="report",
+                needs_account=True,
+                status_progress=status_progress,
+            )
             continue
 
         if isinstance(result_payload, dict):
-            logger.warning("[event] Complete for task_id=%s: %s", task_id)
+            logger.warning("[event] Complete for task_id=%s: %s", task_id, result_payload)
             post_event(args.api_key, events_url, str(task_id), result_payload)
         else:
             logger.warning("[event] Skipped invalid event payload for item: %s", item)
