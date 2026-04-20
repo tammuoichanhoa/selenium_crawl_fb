@@ -6,8 +6,7 @@ import json
 import logging
 import os
 import subprocess
-import urllib.error
-import urllib.request
+import requests
 from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qs, urlparse
 
@@ -21,17 +20,22 @@ from .selectors import guard_fragile_locators, normalize_elements_config, valida
 logger = logging.getLogger(__name__)
 
 
-def parse_dequeue_payload(raw: str) -> Dict[str, Any]:
+def parse_dequeue_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        payload = json.loads(raw)
+        if not raw or "404" in raw:
+            return {}
+        payload = raw
     except json.JSONDecodeError as exc:
-        raise ValueError("Dequeue response is not valid JSON.") from exc
+        raise ValueError(f"Dequeue response is not valid JSON. Raw: {repr(raw)}") from exc
     if not isinstance(payload, dict):
         raise ValueError("Dequeue response must be a JSON object.")
     return payload
 
 
-def derive_step_status(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def derive_step_status(
+    result: Dict[str, Any] | None,
+    status_progress: str | None = None,
+) -> Dict[str, Dict[str, Any]]:
     login_ok = True
     open_link_ok = True
     fetch_info_ok = True
@@ -45,49 +49,138 @@ def derive_step_status(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         else:
             open_link_ok = False
 
+    open_link: Dict[str, Any] = {"ok": open_link_ok}
+    if isinstance(result, dict):
+        final_url = result.get("final_url") or result.get("url")
+        if final_url:
+            open_link["final_url"] = final_url
+
+    fetch_info: Dict[str, Any] = {
+        "ok": fetch_info_ok,
+        "status_progress": status_progress,
+        "data": result,
+    }
+
     return {
         "login": {"ok": login_ok},
-        "open_link": {"ok": open_link_ok},
-        "fetch_info": {"ok": fetch_info_ok, "data": result},
+        "open_link": open_link,
+        "fetch_info": fetch_info,
     }
 
 
-def post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, Any]) -> None:
+def post_event(
+    api_key: str, 
+    event_url: str, 
+    task_id: str, 
+    result: Dict[str, Any] | None = None,
+    event_type: str = "complete",
+    needs_account: bool = False,
+    status_progress: str | None = None,
+) -> None:
     payload = {
         "task_id": task_id,
-        "event_type": "complete",
-        "payload": {
-            "steps": derive_step_status(result),
-        },
+        "event_type": event_type,
+        "payload": {},
     }
-    cmd = [
-        "curl",
-        "-sS",
-        "-X",
-        "POST",
-        event_url,
-        "-H",
-        "Content-Type: application/json",
-        "-H",
-        f"Authorization: Bearer {api_key}",
-        "-d",
-        json.dumps(payload, ensure_ascii=False),
-    ]
-    response = subprocess.run(cmd, capture_output=True, text=True)
-    if response.returncode != 0:
-        logger.error(
-            "[event] Failed to post task_id=%s: %s",
-            task_id,
-            response.stderr.strip(),
+    
+    if event_type == "complete" and result is not None:
+        payload["payload"]["steps"] = derive_step_status(
+            result,
+            status_progress=None,
         )
-    elif response.stdout.strip():
-        logger.info("[event] Response for task_id=%s: %s", task_id, response.stdout.strip())
+    elif event_type == "report":
+        payload["payload"]["needs_account"] = needs_account
+        resolved_status_progress = status_progress
+        if resolved_status_progress is None and isinstance(result, dict):
+            raw_status_progress = result.get("status_progress")
+            if raw_status_progress is not None:
+                resolved_status_progress = str(raw_status_progress)
+        if resolved_status_progress is None:
+            resolved_status_progress = "needs_account" if needs_account else "running"
+        payload["payload"]["steps"] = derive_step_status(
+            result,
+            status_progress=resolved_status_progress,
+        )
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    try:
+        response = requests.post(event_url, headers=headers, json=payload, timeout=30)
+        if not response.ok:
+            logger.error(
+                "[event] Failed to post %s for task_id=%s: HTTP %s %s",
+                event_type,
+                task_id,
+                response.status_code,
+                response.text.strip(),
+            )
+        elif response.text.strip():
+            logger.info("[event] Response for task_id=%s (type=%s): %s", task_id, event_type, response.text.strip())
+    except Exception as exc:
+        logger.error(
+            "[event] Exception posting %s for task_id=%s: %s",
+            event_type,
+            task_id,
+            exc,
+        )
+
+
+def post_type_clone_event(
+    api_key: str,
+    event_url: str,
+    task_id: str,
+    detected_crawl_type: str,
+    reason: str,
+    node_id: str,
+    result: Dict[str, Any] | None = None,
+) -> None:
+    steps = derive_step_status(result)
+    steps["login"]["ok"] = False
+    
+    payload = {
+        "task_id": task_id,
+        "event_type": "type_clone",
+        "payload": {
+            "detected_crawl_type": detected_crawl_type,
+            "reason": reason,
+            "node_id": node_id,
+            "steps": steps
+        }
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    try:
+        response = requests.post(event_url, headers=headers, json=payload, timeout=30)
+        if not response.ok:
+            logger.error(
+                "[event] Failed to post type_clone for task_id=%s: HTTP %s %s",
+                task_id,
+                response.status_code,
+                response.text.strip(),
+            )
+        elif response.text.strip():
+            logger.info("[event] Response for task_id=%s (type=type_clone): %s", task_id, response.text.strip())
+    except Exception as exc:
+        logger.error(
+            "[event] Exception posting type_clone for task_id=%s: %s",
+            task_id,
+            exc,
+        )
 
 
 def extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    items = payload.get("items")
+    if not payload:
+        return []
+    items = []
+    if isinstance(payload, dict):
+        items = payload.get("items", payload.get("data", []))
     if not isinstance(items, list) or not items:
-        raise ValueError("Dequeue response has no items to crawl.")
+        # Instead of breaking execution drastically, just return empty so loop pauses.
+        return []
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -148,6 +241,34 @@ def load_account_cookies(path: str | None) -> Dict[str, str]:
             if uid and cookie_value:
                 cookies[uid] = cookie_value
     return cookies
+
+
+def parse_follower_count(text: str) -> int:
+    if not text or not isinstance(text, str):
+        return 0
+    text = text.lower().strip()
+    multiplier = 1
+    if 'tr' in text or 'm' in text:
+        multiplier = 1000000
+    elif 'k' in text or 'nghìn' in text:
+        multiplier = 1000
+
+    text_digits = ''.join(c for c in text if c.isdigit() or c in '.,')
+    if not text_digits:
+        return 0
+
+    if multiplier > 1:
+        text_digits = text_digits.replace(',', '.')
+        try:
+            return int(float(text_digits) * multiplier)
+        except ValueError:
+            return 0
+    else:
+        text_digits = text_digits.replace(',', '').replace('.', '')
+        try:
+            return int(text_digits)
+        except ValueError:
+            return 0
 
 
 def infer_selector_module(
@@ -230,26 +351,29 @@ def precheck_facebook_uid(
     if "://" not in candidate:
         candidate = _normalize_fb_url(candidate)
 
-    headers = {"User-Agent": user_agent or "Mozilla/5.0"}
-    request = urllib.request.Request(candidate, headers=headers)
+    headers = {
+        "User-Agent": user_agent or "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+    
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = response.getcode()
-            final_url = response.geturl()
-            body = response.read(65536).decode("utf-8", errors="ignore")
-    except urllib.error.HTTPError as exc:
-        status = exc.code
-        final_url = exc.geturl()
-        try:
-            body = exc.read(65536).decode("utf-8", errors="ignore")
-        except Exception:
-            body = ""
+        response = requests.get(candidate, headers=headers, timeout=timeout, allow_redirects=True)
+        status = response.status_code
+        final_url = response.url
+        body = response.text[:65536]  # check first 64kb
+    except requests.exceptions.Timeout:
+        return "slow_loading", "timeout", candidate
     except Exception as exc:
         logger.warning("[precheck] Failed to validate uid=%s: %s", uid, exc)
         return "unknown", f"precheck_failed: {exc}", candidate
 
     if status in (404, 410):
         return "invalid", f"http_{status}", final_url or candidate
+
+    # Trạng thái Facebook hay trả về
+    if "/login/" in final_url or "login.php" in final_url or "?next=" in final_url:
+        return "restricted", "login_required", final_url
 
     body_lower = body.lower()
     invalid_phrases = (
@@ -261,6 +385,15 @@ def precheck_facebook_uid(
     )
     if any(phrase in body_lower for phrase in invalid_phrases):
         return "invalid", "page_not_available", final_url or candidate
+
+    blocked_phrases = (
+        "security check",
+        "temporarily blocked",
+        "you must log in to continue",
+        "rate limit",
+    )
+    if any(phrase in body_lower for phrase in blocked_phrases):
+        return "blocked", "bot_protection_or_blocked", final_url or candidate
 
     return "valid", None, final_url or candidate
 
@@ -524,6 +657,8 @@ __all__ = [
     "load_account_cookies",
     "load_user_agents",
     "parse_dequeue_payload",
+    "parse_follower_count",
     "post_event",
+    "post_type_clone_event",
     "precheck_facebook_uid",
 ]

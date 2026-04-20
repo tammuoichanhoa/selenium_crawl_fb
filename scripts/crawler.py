@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 import datetime
 from pathlib import Path
 import traceback
+from urllib.parse import urlparse, urlunparse
 from selenium.webdriver.common.by import By
 
 from src.fbprofile.storage.paths import compute_paths
@@ -50,6 +51,35 @@ DEFAULT_CONFIG_PATH = os.path.join("configs", "base.json")
 DEFAULT_PAGES_FILE = "pages.txt"
 logger = logging.getLogger(__name__)
 
+GO_TO_DATE_FIELD_NAMES = (
+    "date",
+    "target_date",
+    "go_to_date",
+    "crawl_date",
+)
+DEFAULT_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; SM-G991B) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Mobile Safari/537.36"
+)
+MOBILE_MORE_CONTENT_MARKERS = (
+    "còn nhiều nội dung khác đáng xem",
+    "còn nhiều nội dung khác",
+    "xem thêm ảnh, video",
+    "more content to see",
+    "see more photos",
+)
+MOBILE_LOGIN_MARKERS = (
+    "đăng nhập",
+    "log in",
+    "login",
+)
+MOBILE_SIGNUP_MARKERS = (
+    "tạo tài khoản mới",
+    "create new account",
+    "sign up",
+)
+
 '''
     Nhiệm vụ: vào 1 URL và trích dữ liệu.
 
@@ -80,6 +110,273 @@ def _has_add_friend_button(driver) -> bool:
 
 def _detect_entity_type_from_dom(driver) -> str:
     return "profile" if _has_add_friend_button(driver) else "page"
+
+
+def parse_go_to_date(value: Any) -> datetime.date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        return datetime.datetime.fromtimestamp(timestamp).date()
+
+    raw = str(value).strip()
+    if not raw or raw.lower() in {"none", "null", "false"}:
+        return None
+
+    try:
+        return datetime.date.fromisoformat(raw)
+    except ValueError:
+        pass
+
+    iso_candidate = raw.replace("Z", "+00:00")
+    try:
+        return datetime.datetime.fromisoformat(iso_candidate).date()
+    except ValueError:
+        pass
+
+    for fmt in ("%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y", "%Y%m%d"):
+        try:
+            return datetime.datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"Invalid date value {value!r}. Use YYYY-MM-DD, for example 2025-01-01."
+    )
+
+
+def extract_go_to_date_value(item: Dict[str, Any]) -> Any:
+    cursor = item.get("cursor")
+    if isinstance(cursor, dict) and has_cursor_rid(item):
+        cursor_created_time = cursor.get("created_time")
+        if cursor_created_time not in (None, ""):
+            return cursor_created_time
+
+    for key in GO_TO_DATE_FIELD_NAMES:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+
+    for container_key in ("payload", "params", "metadata"):
+        container = item.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in GO_TO_DATE_FIELD_NAMES:
+            value = container.get(key)
+            if value not in (None, ""):
+                return value
+
+    return None
+
+
+def has_cursor_rid(item: Dict[str, Any]) -> bool:
+    cursor = item.get("cursor")
+    if not isinstance(cursor, dict):
+        return False
+    rid = cursor.get("rid")
+    return isinstance(rid, str) and bool(rid.strip())
+
+
+def _unpack_crawl_target(crawl_target: Any) -> Tuple[str, str | None, datetime.date | None]:
+    if isinstance(crawl_target, dict):
+        uid_or_url = crawl_target.get("uid") or crawl_target.get("url")
+        requested_entity_type = crawl_target.get("selector_module") or crawl_target.get("entity_type")
+        go_to_date_value = extract_go_to_date_value(crawl_target)
+    elif isinstance(crawl_target, (tuple, list)):
+        uid_or_url = crawl_target[0] if len(crawl_target) > 0 else None
+        requested_entity_type = crawl_target[1] if len(crawl_target) > 1 else None
+        go_to_date_value = crawl_target[2] if len(crawl_target) > 2 else None
+    else:
+        uid_or_url = crawl_target
+        requested_entity_type = None
+        go_to_date_value = None
+
+    if not isinstance(uid_or_url, str) or not uid_or_url.strip():
+        raise ValueError(f"Invalid crawl target: {crawl_target!r}")
+
+    if requested_entity_type is not None:
+        requested_entity_type = str(requested_entity_type).strip() or None
+
+    return uid_or_url.strip(), requested_entity_type, parse_go_to_date(go_to_date_value)
+
+
+def _crawl_target_url_for_error(crawl_target: Any) -> str:
+    if isinstance(crawl_target, dict):
+        value = crawl_target.get("uid") or crawl_target.get("url")
+    elif isinstance(crawl_target, (tuple, list)):
+        value = crawl_target[0] if crawl_target else None
+    else:
+        value = crawl_target
+    return str(value or "")
+
+
+def _to_mobile_facebook_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return "https://m.facebook.com/"
+    if "://" not in raw:
+        raw = f"https://www.facebook.com/{raw.lstrip('/')}"
+
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return f"https://m.facebook.com/{raw.lstrip('/')}"
+
+    return urlunparse(parsed._replace(scheme=parsed.scheme or "https", netloc="m.facebook.com"))
+
+
+def _get_current_user_agent(driver) -> str | None:
+    try:
+        value = driver.execute_script("return navigator.userAgent || '';")
+    except Exception:
+        return None
+    return str(value).strip() if value else None
+
+
+def _apply_mobile_browser_profile(driver, mobile_user_agent: str) -> None:
+    driver.execute_cdp_cmd("Network.enable", {})
+    driver.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {
+            "userAgent": mobile_user_agent,
+            "acceptLanguage": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "platform": "Android",
+        },
+    )
+    driver.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": 360,
+            "height": 800,
+            "deviceScaleFactor": 2,
+            "mobile": True,
+        },
+    )
+    driver.execute_cdp_cmd(
+        "Emulation.setTouchEmulationEnabled",
+        {
+            "enabled": True,
+            "maxTouchPoints": 1,
+        },
+    )
+
+
+def _restore_browser_profile(driver, original_user_agent: str | None) -> None:
+    try:
+        driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setTouchEmulationEnabled",
+            {"enabled": False},
+        )
+    except Exception:
+        pass
+    if original_user_agent:
+        try:
+            driver.execute_cdp_cmd(
+                "Network.setUserAgentOverride",
+                {"userAgent": original_user_agent},
+            )
+        except Exception:
+            pass
+
+
+def _page_has_mobile_more_content_prompt(driver) -> bool:
+    try:
+        text = driver.execute_script(
+            "return document.body ? document.body.innerText : '';"
+        ) or ""
+        aria_text = driver.execute_script(
+            """
+            return Array.from(document.querySelectorAll('[aria-label]'))
+              .map(el => el.getAttribute('aria-label') || '')
+              .join('\\n');
+            """
+        ) or ""
+    except Exception:
+        return False
+
+    combined = " ".join(str(value) for value in (text, aria_text)).lower()
+    combined = " ".join(combined.split())
+    has_more_content = any(marker in combined for marker in MOBILE_MORE_CONTENT_MARKERS)
+    has_login = any(marker in combined for marker in MOBILE_LOGIN_MARKERS)
+    has_signup = any(marker in combined for marker in MOBILE_SIGNUP_MARKERS)
+    return has_more_content and (has_login or has_signup)
+
+
+def _check_mobile_more_content_after_scroll(
+    driver,
+    page_url: str,
+    *,
+    wait_after_load: int,
+    original_user_agent: str | None = None,
+    mobile_user_agent: str = DEFAULT_MOBILE_USER_AGENT,
+    max_scrolls: int = 60,
+    stable_rounds: int = 4,
+    pause_seconds: float = 1.2,
+) -> bool:
+    mobile_url = _to_mobile_facebook_url(page_url)
+    desktop_user_agent = original_user_agent or _get_current_user_agent(driver)
+    try:
+        _apply_mobile_browser_profile(driver, mobile_user_agent)
+        logger.info(
+            "[mobile-check] Visiting %s with mobile user-agent: %s",
+            mobile_url,
+            mobile_user_agent,
+        )
+        driver.get(mobile_url)
+        wait_for_page_ready(driver, 20)
+        wait_for_seconds(driver, wait_after_load)
+
+        prev_height = 0
+        stable_count = 0
+        for scroll_index in range(max_scrolls):
+            if _page_has_mobile_more_content_prompt(driver):
+                logger.info(
+                    "[mobile-check] Login prompt with more-content marker found after %d scroll(s).",
+                    scroll_index,
+                )
+                return True
+
+            try:
+                height = int(driver.execute_script("return document.body.scrollHeight || 0;") or 0)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            except Exception as exc:
+                logger.warning("[mobile-check] Scroll failed on %s: %s", mobile_url, exc)
+                return False
+
+            wait_for_seconds(driver, pause_seconds)
+            try:
+                current_height = int(driver.execute_script("return document.body.scrollHeight || 0;") or 0)
+            except Exception:
+                current_height = height
+
+            if current_height <= prev_height:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            logger.info(
+                "[mobile-check] scroll=%d height=%d stable=%d/%d",
+                scroll_index,
+                current_height,
+                stable_count,
+                stable_rounds,
+            )
+            prev_height = current_height
+            if stable_count >= stable_rounds:
+                break
+
+        return _page_has_mobile_more_content_prompt(driver)
+    finally:
+        _restore_browser_profile(driver, desktop_user_agent)
 
 
 def crawl_page(
@@ -192,7 +489,7 @@ Giữa các trang, đợi wait_between_pages.
 '''
 def crawl_urls_batch(
     worker_id: int,
-    indexed_urls: List[Tuple[int, Tuple[str, str | None]]],
+    indexed_urls: List[Tuple[int, Any]],
     *,
     selector_module: str | None,
     login_method: str,
@@ -268,17 +565,35 @@ def crawl_urls_batch(
         except Exception as exc:
             logger.error("[worker %s] Login failed: %s", worker_id, exc)
             return [
-                (index, {"url": url, "error": f"login_failed: {exc}"})
-                for index, (url, _) in indexed_urls
+                (
+                    index,
+                    {
+                        "url": _crawl_target_url_for_error(crawl_target),
+                        "error": f"login_failed: {exc}",
+                    },
+                )
+                for index, crawl_target in indexed_urls
             ]
 
         results: List[Tuple[int, Dict[str, Any]]] = []
         for position, (index, crawl_target) in enumerate(indexed_urls):
-            uid_or_url, requested_entity_type = crawl_target
+            uid_or_url, requested_entity_type, target_date = _unpack_crawl_target(crawl_target)
             url = uid_or_url
             if not str(url).startswith("http"):
                 url = f"https://www.facebook.com/{url}"
             try:
+                from src.utils.task_flow import precheck_facebook_uid
+                status, reason, checked_url = precheck_facebook_uid(
+                    url, timeout=5.0, user_agent=user_agent
+                )
+                logger.info("[worker %s] Precheck status for %s: %s (reason: %s)", worker_id, url, status, reason)
+                if status in ("invalid", "blocked", "not_found"):
+                    logger.warning("[worker %s] Skip %s due to %s: %s", worker_id, url, status, reason)
+                    raise RuntimeError(f"precheck_{status}: {reason}")
+                if status == "restricted" and login_method == "anonymous":
+                    logger.warning("[worker %s] Skip %s because anonymous mode cannot view restricted page", worker_id, url)
+                    raise RuntimeError(f"precheck_{status}: login_required")
+                
                 url_name = str(url).split('/')[-1].split('?')[0]
                 if not url_name: url_name = str(url)
                 
@@ -313,6 +628,8 @@ def crawl_urls_batch(
                         resolved_entity_type,
                     )
 
+                profile_data = None
+                page_info_data = None
                 if resolved_entity_type == "profile":
                     profile_data = scrape_full_profile_info(
                         driver,
@@ -327,7 +644,7 @@ def crawl_urls_batch(
                         raise RuntimeError(
                             "Missing page scraper: src.fbprofile.browser.get_page_info"
                         ) from exc
-                    page_data = scrape_full_page_info(
+                    page_info_data = scrape_full_page_info(
                         driver,
                         url,
                         page_info_path,
@@ -355,12 +672,14 @@ def crawl_urls_batch(
                     selector_debug_cfg_profile,
                     selector_debug_cfg_page,
                 )
-                target_date = datetime.date.today()
-                if "group" not in url:
+                if target_date and "group" not in url:
                     try:
                         go_to_date(driver, target_date)
+                        page_data["go_to_date"] = target_date.isoformat()
                     except Exception as e:
                         logger.warning("[worker %s] Lỗi go_to_date: %s", worker_id, e)
+                elif target_date is None:
+                    logger.info("[worker %s] Skip go_to_date for %s: no date provided", worker_id, url)
 
                 seen_ids = set()
                 ts_state = {"latest": None, "earliest": None}
@@ -379,13 +698,51 @@ def crawl_urls_batch(
                 if ts_state["latest"] is not None:
                     save_checkpoint(checkpoint, ts_state["latest"])
 
-                # profile_data = {}
-                # if profile_info_path.exists():
-                #     try:
-                #         import json
-                #         with open(profile_info_path, "r", encoding="utf-8") as f:
-                #             profile_data = json.load(f)
-                #     except: pass
+                if resolved_entity_type == "page" and login_method == "anonymous":
+                    try:
+                        if _check_mobile_more_content_after_scroll(
+                            driver,
+                            url,
+                            wait_after_load=wait_after_load,
+                            original_user_agent=user_agent,
+                        ):
+                            page_data["needs_account_error"] = True
+                            page_data["needs_account_reason"] = "mobile_more_content_login_prompt"
+                            logger.warning(
+                                "[worker %s] needs_account: mobile page still shows more-content login prompt for %s",
+                                worker_id,
+                                url,
+                            )
+                    except Exception as mobile_check_e:
+                        logger.warning(
+                            "[worker %s] Failed checking mobile more-content prompt: %s",
+                            worker_id,
+                            mobile_check_e,
+                        )
+                elif resolved_entity_type == "page" and page_info_path.exists():
+                    try:
+                        import json
+                        from src.utils.task_flow import parse_follower_count
+                        with open(page_info_path, "r", encoding="utf-8") as f:
+                            saved_page_data = json.load(f)
+                        if page_info_data is None:
+                            page_info_data = saved_page_data
+                        raw_f = saved_page_data.get("basic_info", {}).get("followers", "0")
+                        total_f = parse_follower_count(raw_f)
+                        scraped_f = len(saved_page_data.get("followers_list", []))
+                        
+                        diff_pct = int(os.environ.get("FOLLOWER_DIFF_PERCENT", "20"))
+                        if total_f > 0:
+                            required_f = int(total_f * (100 - diff_pct) / 100)
+                            if scraped_f < required_f:
+                                if not (total_f > 10000 and scraped_f > 5000):
+                                    page_data["needs_account_error"] = True
+                                    logger.warning(
+                                        "[worker %s] needs_account: scraped followers (%s) < required (%s) for %s", 
+                                        worker_id, scraped_f, required_f, url
+                                    )
+                    except Exception as parse_e:
+                        logger.warning("[worker %s] Failed checking follower gap: %s", worker_id, parse_e)
                 
                 posts_data = []
                 if out_ndjson.exists():
@@ -399,9 +756,19 @@ def crawl_urls_batch(
                     except Exception as e:
                         logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
 
+                if resolved_entity_type == "page" and page_info_data is None and page_info_path.exists():
+                    try:
+                        with open(page_info_path, "r", encoding="utf-8") as f:
+                            page_info_data = json.load(f)
+                    except Exception as e:
+                        logger.warning("[worker %s] Failed reading page_info payload: %s", worker_id, e)
+
                 page_data["profile_info"] = profile_data
+                if resolved_entity_type == "page":
+                    page_data["page_info"] = page_info_data
                 page_data["posts"] = posts_data
-                page_data["posts_collected"] = len(seen_ids)
+                page_data["posts_collected"] = len(posts_data)
+                page_data["posts_collected_current_run"] = len(seen_ids)
                 page_data["output_ndjson"] = str(out_ndjson)
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
@@ -435,7 +802,18 @@ def main() -> None:
         dest="selector_module",
         help="Selector module to use (overrides env/config).",
     )
+    parser.add_argument(
+        "--date",
+        dest="go_to_date",
+        help="Optional timeline end date for go_to_date, formatted YYYY-MM-DD.",
+    )
     args = parser.parse_args()
+    if args.go_to_date:
+        try:
+            parsed_go_to_date = parse_go_to_date(args.go_to_date)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        args.go_to_date = parsed_go_to_date.isoformat() if parsed_go_to_date else None
     '''
     Load cấu hình crawler
     '''
@@ -648,7 +1026,11 @@ def main() -> None:
         len(profile_dirs),
     )
     indexed_results: Dict[int, Dict[str, Any]] = {}
-    page_batches = split_pages_for_workers(pages, max_workers)
+    page_targets = [
+        (page, selector_module, args.go_to_date)
+        for page in pages
+    ]
+    page_batches = split_pages_for_workers(page_targets, max_workers)
     port_pool_size = int(
         env.get("PORT_POOL_SIZE")
         or login_cfg.get("port_pool_size")
