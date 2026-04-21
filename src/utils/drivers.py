@@ -354,6 +354,7 @@ def login_facebook_with_cookies(
 
     driver.get(home_url)
     wait_for_page_ready(driver, 20)
+    # time.sleep(20)
 
     for cookie in cookies:
         payload = {
@@ -438,7 +439,7 @@ def create_logged_in_driver(
         window_position=window_position,
         incognito=(login_method in ("anonymous", "none", "no_login")),
     )
-
+    print("Create driver done")
     try:
         if login_method == "cookies":
             ok = login_facebook_with_cookies(
@@ -446,6 +447,7 @@ def create_logged_in_driver(
                 cookies_raw,
                 home_url=home_url,
             )
+            print("Login by cookies sucessfull!")
         elif login_method == "profile":
             ok = verify_facebook_login_state(driver, home_url=home_url)
         elif login_method in ("anonymous", "none", "no_login"):
