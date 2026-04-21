@@ -16,7 +16,7 @@ from urllib.parse import urlparse, urlunparse
 from selenium.webdriver.common.by import By
 
 from src.fbprofile.storage.paths import compute_paths
-from src.fbprofile.browser.hooks import install_early_hook
+from src.fbprofile.browser.hooks import flush_gql_recs, install_early_hook
 from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
 from src.fbprofile.browser.navigation import go_to_date
 from src.fbprofile.browser.scroll import crawl_scroll_loop
@@ -579,6 +579,7 @@ def crawl_urls_batch(
         for position, (index, crawl_target) in enumerate(indexed_urls):
             uid_or_url, requested_entity_type, target_date = _unpack_crawl_target(crawl_target)
             url = uid_or_url
+            data = {}
             if not str(url).startswith("http"):
                 url = f"https://www.facebook.com/{url}"
             try:
@@ -596,13 +597,7 @@ def crawl_urls_batch(
                 
                 url_name = str(url).split('/')[-1].split('?')[0]
                 if not url_name: url_name = str(url)
-                
-                data_root = str(Path(PROJECT_ROOT) / "database")
-                database_path, out_ndjson, raw_dumps_dir, checkpoint = compute_paths(
-                    Path(data_root).resolve(), url_name, ""
-                )
-                profile_info_path = database_path / "profile_info.json"
-                page_info_path = database_path / "page_info.json"
+
                 resolved_entity_type = requested_entity_type or selector_module
                 logger.info(
                     "[worker %s] Resolved entity type for %s: %s",
@@ -610,10 +605,9 @@ def crawl_urls_batch(
                     url,
                     resolved_entity_type or "unknown",
                 )
-
                 install_early_hook(driver, keep_last=350)
                 if (
-                    resolved_entity_type not in {"profile", "page"}
+                    resolved_entity_type not in {"profile", "page", "group"}
                     and elements_cfg_profile is not None
                     and elements_cfg_page is not None
                 ):
@@ -630,6 +624,17 @@ def crawl_urls_batch(
 
                 profile_data = None
                 page_info_data = None
+                # Compute output paths only after entity type resolution so
+                # checkpoints and dumps land under the correct directory.
+                data_root = str(Path(PROJECT_ROOT) / "database")
+                database_path, out_ndjson, raw_dumps_dir, checkpoint = compute_paths(
+                    Path(data_root).resolve(), url_name, resolved_entity_type
+                )
+
+                profile_info_path = database_path / "profile_info.json"
+                page_info_path = database_path / "page_info.json"
+                group_info_path = database_path / "group_info.json"
+
                 if resolved_entity_type == "profile":
                     profile_data = scrape_full_profile_info(
                         driver,
@@ -637,6 +642,46 @@ def crawl_urls_batch(
                         profile_info_path,
                         scroll_until_stable_cfg=scroll_until_stable_cfg,
                     )
+                    # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
+                    # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
+                    driver.get(url)
+                    wait_for_page_ready(driver, 20)
+                    wait_for_seconds(driver, wait_after_load)
+                    flush_gql_recs(driver)
+
+                    seen_ids = set()
+                    ts_state = {"latest": None, "earliest": None}
+
+                    crawl_scroll_loop(
+                        driver,
+                        group_url=url,
+                        out_path=out_ndjson,
+                        seen_ids=seen_ids,
+                        keep_last=350,
+                        max_scrolls=10000,
+                        ts_state=ts_state,
+                        scroll_until_stable_cfg=scroll_until_stable_cfg,
+                    )
+
+                    if ts_state["latest"] is not None:
+                        save_checkpoint(checkpoint, ts_state["latest"])
+                    
+                    posts_data = []
+                    if out_ndjson.exists():
+                        try:
+                            import json
+                            with open(out_ndjson, "r", encoding="utf-8") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if line:
+                                        posts_data.append(json.loads(line))
+                        except Exception as e:
+                            logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
+
+                    data["profile_info"] = profile_data
+                    data["posts"] = posts_data
+                    data["posts_collected"] = len(seen_ids)
+                    # page_data["output_ndjson"] = str(out_ndjson)
                 elif resolved_entity_type == "page":
                     try:
                         from src.fbprofile.browser.get_page_info import scrape_full_page_info
@@ -650,6 +695,63 @@ def crawl_urls_batch(
                         page_info_path,
                         scroll_until_stable_cfg=scroll_until_stable_cfg,
                     )
+                    # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
+                    # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
+                    driver.get(url)
+                    wait_for_page_ready(driver, 20)
+                    wait_for_seconds(driver, wait_after_load)
+                    flush_gql_recs(driver)
+
+                    seen_ids = set()
+                    ts_state = {"latest": None, "earliest": None}
+
+                    crawl_scroll_loop(
+                        driver,
+                        group_url=url,
+                        out_path=out_ndjson,
+                        seen_ids=seen_ids,
+                        keep_last=350,
+                        max_scrolls=10000,
+                        ts_state=ts_state,
+                        scroll_until_stable_cfg=scroll_until_stable_cfg,
+                    )
+
+                    if ts_state["latest"] is not None:
+                        save_checkpoint(checkpoint, ts_state["latest"])
+                    
+                    posts_data = []
+                    if out_ndjson.exists():
+                        try:
+                            import json
+                            with open(out_ndjson, "r", encoding="utf-8") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if line:
+                                        posts_data.append(json.loads(line))
+                        except Exception as e:
+                            logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
+
+                    
+                    data["page_info"] = page_data
+                    data["posts"] = posts_data
+                    data["posts_collected"] = len(seen_ids)
+
+                elif resolved_entity_type == "group":
+                    try:
+                        from src.fbprofile.browser.get_group_info import scrape_full_group_info
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "Missing page scraper: src.fbprofile.browser.get_page_info"
+                        ) from exc
+                    group_data = scrape_full_group_info(
+                        driver,
+                        url,
+                        group_info_path,
+                        max_pages=1,
+                        photo_limit=2,
+                        scroll_until_stable_cfg=scroll_until_stable_cfg,
+                    )
+                    data["group_info"] = group_data
                 else:
                     logger.info(
                         "[worker %s] Skipping specialized profile/page scraper for %s",
@@ -772,9 +874,9 @@ def crawl_urls_batch(
                 page_data["output_ndjson"] = str(out_ndjson)
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
-                page_data = {"url": url, "error": str(exc)}
+                data = {"url": url, "error": str(exc)}
 
-            results.append((index, page_data))
+            results.append((index, data))
 
             is_last_page = position == len(indexed_urls) - 1
             if not is_last_page:
@@ -786,7 +888,6 @@ def crawl_urls_batch(
             terminate_chrome_process(driver)
         port_queue.put(debug_port)
         logger.info("[worker %s] Finished (port %s)", worker_id, debug_port)
-
 
 def main() -> None:
     setup_logging()
@@ -859,9 +960,7 @@ def main() -> None:
     for profile_dir in profile_dirs:
         os.makedirs(profile_dir, exist_ok=True)
 
-    '''
-    Arguments to build driver in Selenium -> Đưa ra thành 1 hàm load config
-    '''
+    # Arguments to build driver in Selenium -> Đưa ra thành 1 hàm load config
     headless = str_to_bool(env.get("HEADLESS"), login_cfg.get("headless", False))
     pages_file = crawl_cfg.get("pages_file") or DEFAULT_PAGES_FILE
     wait_after_load = int(crawl_cfg.get("wait_after_load", 3))
@@ -1073,7 +1172,7 @@ def main() -> None:
                 selector_debug_cfg=selector_debug_cfg,
                 selector_debug_cfg_profile=None,
                 selector_debug_cfg_page=None,
-                scroll_until_stable_cfg=scroll_until_stable_cfg,
+                # scroll_until_stable_cfg=scroll_until_stable_cfg,
             )
             for worker_id, batch in enumerate(page_batches, start=1)
         ]

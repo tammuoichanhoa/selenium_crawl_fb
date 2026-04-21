@@ -38,6 +38,7 @@ Thumbs.db
 
 # Runtime logs and temp files
 *.log
+logs/logs/
 *.tmp
 tmp/
 
@@ -69,3 +70,13 @@ scripts/crawler_thai.py
 main_ba.py
 solution.md
 ba-docs.txt
+
+groups
+article_debug.html
+cookie_string.txt
+debug_post_0.json
+test.py
+.codex
+outputs/*
+logs/*
+docs
