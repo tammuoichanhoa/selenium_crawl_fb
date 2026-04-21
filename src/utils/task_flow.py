@@ -35,6 +35,7 @@ def parse_dequeue_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
 def derive_step_status(
     result: Dict[str, Any] | None,
     status_progress: str | None = None,
+    force_open_link_ok: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     login_ok = True
     open_link_ok = True
@@ -46,8 +47,9 @@ def derive_step_status(
         if error.startswith("login_failed"):
             login_ok = False
             open_link_ok = False
-        else:
-            open_link_ok = False
+
+    if force_open_link_ok:
+        open_link_ok = True
 
     open_link: Dict[str, Any] = {"ok": open_link_ok}
     if isinstance(result, dict):
@@ -87,6 +89,7 @@ def post_event(
         payload["payload"]["steps"] = derive_step_status(
             result,
             status_progress=None,
+            force_open_link_ok=True,
         )
     elif event_type == "report":
         payload["payload"]["needs_account"] = needs_account

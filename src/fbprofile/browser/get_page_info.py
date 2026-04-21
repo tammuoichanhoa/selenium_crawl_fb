@@ -1,7 +1,9 @@
 import time
 import json
 from pathlib import Path
+from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -262,7 +264,7 @@ def get_page_featured_news(driver, target_url, timeout: int = 5, batch_size: int
 # ==========================================
 def get_page_introduces(driver, target_url, timeout: int = 5) -> dict:
     """Lấy thông tin cá nhân từ trang chủ bằng cách đọc các listitem."""
-    current_url = driver.current_url
+    current_url = driver.current_url or ""
     target_home = target_url.rstrip("/")
     
     if target_home not in current_url:
@@ -276,24 +278,29 @@ def get_page_introduces(driver, target_url, timeout: int = 5) -> dict:
 
     try:
         list_item_selector = "div[aria-labelledby] div[role='listitem']"
-        wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, list_item_selector)))
+        try:
+            wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, list_item_selector)))
+        except TimeoutException:
+            logger.debug("[PAGE] Không tìm thấy listitem trong section thông tin cá nhân.")
+
         items = driver.find_elements(By.CSS_SELECTOR, list_item_selector)
         logger.info(f"[PAGE] Tìm thấy {len(items)} item trong section thông tin cá nhân.")
 
-            # Trên fanpage, các mục info thường đi kèm với thẻ img làm icon (class x1b0d499)
-            # Nội dung nằm ở thẻ div kế tiếp
-            row_xpath = "//img[contains(@class, 'x1b0d499') or @height='24']/parent::div/following-sibling::div"
-            rows = driver.find_elements(By.XPATH, row_xpath)
-            
-            for row in rows:
-                text_content = row.text.strip()
-                clean_text = clean_intro_text(text_content)
-                if clean_text and clean_text not in data[key]:
-                    data[key].append(clean_text)
+        for item in items:
+            clean_text = clean_intro_text(item.text, separator=" - ")
+            if clean_text and clean_text not in data["personal_info"]:
+                data["personal_info"].append(clean_text)
 
-        except Exception as e:
-            logger.debug(f"[PAGE] Lỗi tại tab {key}: {e}")
-            continue
+        # Fallback cho layout có icon: nội dung nằm ở div kế tiếp icon.
+        row_xpath = "//img[contains(@class, 'x1b0d499') or @height='24']/parent::div/following-sibling::div"
+        rows = driver.find_elements(By.XPATH, row_xpath)
+        for row in rows:
+            clean_text = clean_intro_text(row.text, separator=" - ")
+            if clean_text and clean_text not in data["personal_info"]:
+                data["personal_info"].append(clean_text)
+
+    except Exception as e:
+        logger.debug(f"[PAGE] Lỗi khi quét thông tin cá nhân: {e}")
 
     return data
 
@@ -334,7 +341,7 @@ def get_page_pictures(driver, target_url, timeout: int = 20) -> list:
 # ==========================================
 # 5. FRIENDS (Bạn bè)
 # ==========================================
-def get_page_followers(driver, target_url, timeout: int = 5) -> list:
+def get_page_followers(driver, target_url, timeout: int = 5, scroll_until_stable_cfg=None) -> list:
     """Lấy danh sách Người theo dõi (Followers) trên Fanpage (có cuộn trang)."""
     followers_list = []
     
@@ -414,7 +421,12 @@ def get_page_followers(driver, target_url, timeout: int = 5) -> list:
 # ==========================================
 # MAIN ORCHESTRATOR
 # ==========================================
-def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> dict:
+def scrape_full_page_info(
+    driver,
+    target_url: str,
+    output_path: Path = None,
+    scroll_until_stable_cfg=None,
+) -> dict:
     """
     Hàm chính điều phối việc lấy TOÀN BỘ thông tin PAGE và trả về dict, lưu file nếu output_path được cung cấp.
     """
@@ -449,11 +461,19 @@ def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> 
 
         # 4. Photos
         # full_data["photos"] = get_PAGE_pictures(driver, target_url)
-        full_data["photos"] = get_page_high_res_pictures(driver, target_url)
+        full_data["photos"] = get_page_high_res_pictures(
+            driver,
+            target_url,
+            scroll_until_stable_cfg=scroll_until_stable_cfg,
+        )
         logger.info(f"[PAGE] ✅ Xong Photos ({len(full_data['photos'])} ảnh)")
 
         # 5. Followers (thay cho Friends)
-        full_data["followers_list"] = get_page_followers(driver, target_url)
+        full_data["followers_list"] = get_page_followers(
+            driver,
+            target_url,
+            scroll_until_stable_cfg=scroll_until_stable_cfg,
+        )
         logger.info(f"[PAGE] ✅ Xong Followers ({len(full_data.get('followers_list', []))} người)")
 
     except Exception as e:
@@ -469,7 +489,16 @@ def scrape_full_page_info(driver, target_url: str, output_path: Path = None) -> 
                 logger.error(f"[PAGE] Không thể lưu file: {save_err}")
         
         return full_data
-def get_page_high_res_pictures(driver, target_url, timeout=5, max_photos=None, batch_size=10):
+
+
+def get_page_high_res_pictures(
+    driver,
+    target_url,
+    timeout=5,
+    max_photos=None,
+    batch_size=10,
+    scroll_until_stable_cfg=None,
+):
     """
     Lấy link ảnh High Res bằng cách mở nhiều tab cùng lúc (Batching).
     Đã fix lỗi trình duyệt không chịu tải ảnh ở các tab ngầm.

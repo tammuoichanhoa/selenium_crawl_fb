@@ -22,7 +22,6 @@ from crawler import (
 )
 from scripts.dequeue_task import run_request
 from crawler import crawl_urls_batch, _normalize_selector_modules
-from scripts.dequeue_task import run_curl
 from src.utils import (
     build_port_queue,
     build_service_url,
