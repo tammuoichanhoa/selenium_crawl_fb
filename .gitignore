@@ -38,6 +38,7 @@ Thumbs.db
 
 # Runtime logs and temp files
 *.log
+logs/logs/
 *.tmp
 tmp/
 

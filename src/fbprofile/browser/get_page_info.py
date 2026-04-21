@@ -9,6 +9,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
 # Import logger từ hệ thống log hiện tại
 from logs.loging_config import logger
+from .intro_filter import clean_intro_text
 from .stable_scroll import scroll_until_stable
 
 
@@ -306,10 +307,9 @@ def get_page_introduces(driver, target_url, timeout: int = 5) -> dict:
             
             for row in rows:
                 text_content = row.text.strip()
-                if text_content and "Không có" not in text_content and "để hiển thị" not in text_content:
-                    clean_text = text_content.replace("\n", " - ")
-                    if clean_text not in data[key]:
-                        data[key].append(clean_text)
+                clean_text = clean_intro_text(text_content)
+                if clean_text and clean_text not in data[key]:
+                    data[key].append(clean_text)
 
         except Exception as e:
             logger.debug(f"[PAGE] Lỗi tại tab {key}: {e}")

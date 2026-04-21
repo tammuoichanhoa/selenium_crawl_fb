@@ -10,6 +10,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from logs.loging_config import logger
 from src.utils.selectors import resolve_locator, validate_selector_payload
+from .intro_filter import clean_intro_text
 from .stable_scroll import scroll_until_stable
 
 
@@ -172,15 +173,11 @@ def _extract_attr_from_selector(
 def _collect_texts_from_selector(driver, selector_name: str, timeout: int | None = None, **format_kwargs) -> list[str]:
     """Collect unique, cleaned texts from matched elements."""
     values = []
-    ignored_tokens = ("Không có", "để hiển thị")
 
     for element in _find_elements_by_selector(driver, selector_name, timeout=timeout, **format_kwargs):
         text_value = element.text.strip()
-        if not text_value:
-            continue
-
-        clean_text = text_value.replace("\n", " ")
-        if any(token in clean_text for token in ignored_tokens):
+        clean_text = clean_intro_text(text_value, separator=" ")
+        if not clean_text:
             continue
 
         if clean_text not in values:
