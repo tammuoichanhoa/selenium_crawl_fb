@@ -21,7 +21,6 @@ from crawler import (
     _normalize_selector_modules,
 )
 from scripts.dequeue_task import run_request
-from crawler import crawl_urls_batch, _normalize_selector_modules
 from src.utils import (
     build_port_queue,
     build_service_url,
@@ -67,6 +66,67 @@ def pick_value(cli_value: Any, env: Dict[str, Any], env_key: str, default: Any =
     if value not in (None, ""):
         return value
     return default
+
+
+def pick_int(
+    cli_value: Any,
+    env: Dict[str, Any],
+    env_key: str,
+    default: Any,
+    fallback: int,
+) -> int:
+    value = pick_value(cli_value, env, env_key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[config] Invalid integer for %s=%r; using fallback=%s",
+            env_key,
+            value,
+            fallback,
+        )
+        return fallback
+
+
+def pick_bool(
+    cli_value: Any,
+    env: Dict[str, Any],
+    env_key: str,
+    default: Any,
+    fallback: bool,
+) -> bool:
+    return str_to_bool(
+        pick_value(cli_value, env, env_key, default),
+        str_to_bool(default, fallback),
+    )
+
+
+def _crawl_types_contains(item: Dict[str, Any], target_type: str) -> bool:
+    crawl_types = item.get("crawl_types")
+    if not isinstance(crawl_types, list):
+        return False
+    needle = target_type.lower()
+    return any(needle in str(value).strip().lower() for value in crawl_types)
+
+
+def _declared_target_type(
+    item: Dict[str, Any],
+    bucket_module: str | None,
+) -> str | None:
+    actual_type = infer_fb_type_from_url(item.get("uid"))
+    if actual_type in {"profile", "page", "group"}:
+        return actual_type
+
+    for target_type in ("group", "page", "profile"):
+        if _crawl_types_contains(item, target_type):
+            return target_type
+
+    module = item.get("selector_module") or bucket_module
+    if isinstance(module, str) and module.strip().lower() in {"profile", "page", "group"}:
+        return module.strip().lower()
+
+    return None
+
 
 def _crawl_from_uids(
     items: List[Dict[str, Any]],
@@ -160,48 +220,62 @@ def _crawl_from_uids(
 
     login_method = (
         login_method_override
+        or (getattr(cli_args, "login_method", None) if cli_args else None)
         or env.get("LOGIN_METHOD")
         or login_cfg.get("method")
         or "cookies"
     ).strip().lower()
 
-    headless = str_to_bool(
+    headless = pick_bool(
         getattr(cli_args, "headless", None) if cli_args else None,
-        str_to_bool(env.get("HEADLESS"), login_cfg.get("headless", False)),
+        env,
+        "HEADLESS",
+        login_cfg.get("headless", False),
+        False,
     )
 
-    wait_after_load = (
-        getattr(cli_args, "wait_after_load", None)
-        if cli_args and getattr(cli_args, "wait_after_load", None) is not None
-        else int(crawl_cfg.get("wait_after_load", 3))
+    wait_after_load = pick_int(
+        getattr(cli_args, "wait_after_load", None) if cli_args else None,
+        env,
+        "WAIT_AFTER_LOAD",
+        crawl_cfg.get("wait_after_load", 3),
+        3,
     )
 
-    wait_between_pages = (
-        getattr(cli_args, "wait_between_pages", None)
-        if cli_args and getattr(cli_args, "wait_between_pages", None) is not None
-        else int(crawl_cfg.get("wait_between_pages", 0))
+    wait_between_pages = pick_int(
+        getattr(cli_args, "wait_between_pages", None) if cli_args else None,
+        env,
+        "WAIT_BETWEEN_PAGES",
+        crawl_cfg.get("wait_between_pages", 0),
+        0,
     )
 
-    element_timeout = (
-        getattr(cli_args, "element_timeout", None)
-        if cli_args and getattr(cli_args, "element_timeout", None) is not None
-        else int(crawl_cfg.get("element_timeout", 15))
+    element_timeout = pick_int(
+        getattr(cli_args, "element_timeout", None) if cli_args else None,
+        env,
+        "ELEMENT_TIMEOUT",
+        crawl_cfg.get("element_timeout", 15),
+        15,
     )
 
-    login_stagger_seconds = (
-        getattr(cli_args, "login_stagger_seconds", None)
-        if cli_args and getattr(cli_args, "login_stagger_seconds", None) is not None
-        else int(crawl_cfg.get("login_stagger_seconds", 2))
+    login_stagger_seconds = pick_int(
+        getattr(cli_args, "login_stagger_seconds", None) if cli_args else None,
+        env,
+        "LOGIN_STAGGER_SECONDS",
+        crawl_cfg.get("login_stagger_seconds", 2),
+        2,
+    )
+    run_generic_selector_after_info = pick_bool(
+        getattr(cli_args, "run_generic_selector_after_info", None) if cli_args else None,
+        env,
+        "RUN_GENERIC_SELECTOR_AFTER_INFO",
+        crawl_cfg.get("run_generic_selector_after_info", False),
+        False,
     )
     profile_dirs = resolve_profile_dirs(env, crawl_cfg, login_cfg)
     for profile_dir in profile_dirs:
         os.makedirs(profile_dir, exist_ok=True)
 
-    headless = str_to_bool(env.get("HEADLESS"), login_cfg.get("headless", False))
-    wait_after_load = int(crawl_cfg.get("wait_after_load", 3))
-    wait_between_pages = int(crawl_cfg.get("wait_between_pages", 0))
-    element_timeout = int(crawl_cfg.get("element_timeout", 15))
-    login_stagger_seconds = int(crawl_cfg.get("login_stagger_seconds", 2))
     scroll_until_stable_cfg = (
         crawl_cfg.get("scroll_until_stable")
         if isinstance(crawl_cfg.get("scroll_until_stable"), dict)
@@ -320,6 +394,7 @@ def _crawl_from_uids(
                 selector_debug_cfg_profile=selector_debug_cfg_profile,
                 selector_debug_cfg_page=selector_debug_cfg_page,
                 scroll_until_stable_cfg=scroll_until_stable_cfg,
+                run_generic_selector_after_info=run_generic_selector_after_info,
                 profile_backup_name=profile_backup_name if worker_id == 1 else None,
             )
             for worker_id, batch in enumerate(batches, start=1)
@@ -395,6 +470,11 @@ def main() -> int:
     parser.add_argument("--wait-between-pages", dest="wait_between_pages", type=int, help="Override crawl.wait_between_pages")
     parser.add_argument("--element-timeout", dest="element_timeout", type=int, help="Override crawl.element_timeout")
     parser.add_argument("--login-stagger-seconds", dest="login_stagger_seconds", type=int, help="Override crawl.login_stagger_seconds")
+    parser.add_argument(
+        "--run-generic-selector-after-info",
+        dest="run_generic_selector_after_info",
+        help="Override RUN_GENERIC_SELECTOR_AFTER_INFO/crawl.run_generic_selector_after_info (true/false).",
+    )
 
     parser.add_argument("--port-range-min", dest="port_range_min", type=int, help="Override PORT_RANGE_MIN")
     parser.add_argument("--port-range-max", dest="port_range_max", type=int, help="Override PORT_RANGE_MAX")
@@ -437,10 +517,19 @@ def main() -> int:
             logger.error("Missing API key. Provide --api-key or set API_KEY env var.")
             return 2
 
-        result = run_request(args.api_key)
-        if result.status_code != 200:
-            logger.error("Dequeue request failed: %s", result.stderr.strip())
-            return result.returncode
+        try:
+            result = run_request(args.api_key)
+        except ValueError as exc:
+            logger.error("Dequeue request is not configured: %s", exc)
+            return 2
+
+        if not result.ok:
+            logger.error(
+                "Dequeue request failed: status=%s error=%s",
+                result.status_code,
+                result.error or result.text,
+            )
+            return 1
 
         payload = parse_dequeue_payload(result.json())
         # print("payload>>>>>>>>>", payload)
@@ -480,10 +569,11 @@ def main() -> int:
         item["_index"] = index
         account_uid = extract_account_uid(item)
         account_cookie = extract_account_cookie(item, account_cookies)
+        force_profile_login = bool(account_uid and not account_cookie)
         # print("Account Info: ", account_uid, account_cookie)
-        if account_uid and not account_cookie:
+        if force_profile_login:
             logger.warning(
-                "[account] No cookies found for account uid=%s; falling back to .env COOKIES.",
+                "[account] No cookies found for account uid=%s; forcing LOGIN_METHOD=profile.",
                 account_uid,
             )
         group_key = account_uid or (
@@ -493,10 +583,17 @@ def main() -> int:
         )
         group = grouped_items.setdefault(
             group_key,
-            {"account_uid": account_uid, "cookies": account_cookie, "items": []},
+            {
+                "account_uid": account_uid,
+                "cookies": account_cookie,
+                "force_login_method": "profile" if force_profile_login else None,
+                "items": [],
+            },
         )
         if account_cookie and not group.get("cookies"):
             group["cookies"] = account_cookie
+            if group.get("force_login_method") == "profile":
+                group["force_login_method"] = None
         elif (
             account_cookie
             and group.get("cookies")
@@ -511,33 +608,56 @@ def main() -> int:
     indexed_results: Dict[int, Dict[str, Any]] = {}
     for group in grouped_items.values():
         group_items = group["items"]
+        forced_login_method = group.get("force_login_method")
         module_buckets: Dict[Tuple[str | None, str | None], List[Dict[str, Any]]] = {}
         for item in group_items:
             inferred = infer_module_for_item(item, selector_modules, None)
             item["selector_module"] = inferred
-            login_method_for_item = "profile" if has_cursor_rid(item) else ("anonymous" if args.anonymous else None)
+            login_method_for_item = (
+                "profile"
+                if has_cursor_rid(item) or forced_login_method == "profile"
+                else (
+                    (args.login_method.strip().lower() if args.login_method else None)
+                    or ("anonymous" if args.anonymous else None)
+                )
+            )
             if login_method_for_item == "profile":
                 cursor = item.get("cursor") if isinstance(item.get("cursor"), dict) else {}
-                logger.info(
-                    "[cursor] task_id=%s has cursor.rid=%s created_time=%s; forcing LOGIN_METHOD=profile",
-                    item.get("task_id"),
-                    cursor.get("rid"),
-                    cursor.get("created_time"),
-                )
+                if has_cursor_rid(item):
+                    logger.info(
+                        "[cursor] task_id=%s has cursor.rid=%s created_time=%s; forcing LOGIN_METHOD=profile",
+                        item.get("task_id"),
+                        cursor.get("rid"),
+                        cursor.get("created_time"),
+                    )
+                elif forced_login_method == "profile":
+                    logger.info(
+                        "[account] task_id=%s account uid=%s has no cookie; forcing LOGIN_METHOD=profile",
+                        item.get("task_id"),
+                        group.get("account_uid"),
+                    )
             module_buckets.setdefault((inferred, login_method_for_item), []).append(item)
 
         for (module, login_method_for_bucket), module_items in module_buckets.items():
             valid_items: List[Dict[str, Any]] = []
+            bucket_module = module or inferred_module
             for item in module_items:
                 uid = item.get("uid")
                 
-                actual_type = infer_fb_type_from_url(uid)
                 login_cfg = config.get("login", {})
-                global_login_method = (env.get("LOGIN_METHOD") or login_cfg.get("method") or "cookies").strip().lower()
+                global_login_method = (
+                    env.get("LOGIN_METHOD")
+                    or login_cfg.get("method")
+                    or "cookies"
+                ).strip().lower()
                 effective_login_method = login_method_for_bucket or global_login_method
                 is_anon = effective_login_method == "anonymous"
-                if is_anon and actual_type == "profile":
-                    logger.warning("[type_clone] Anonymous mode cannot crawl profile. Recalling task: %s", uid)
+                declared_type = _declared_target_type(item, bucket_module)
+                if is_anon and declared_type == "profile":
+                    logger.warning(
+                        "[type_clone] Anonymous mode cannot crawl profile. Recalling task: %s",
+                        uid,
+                    )
                     indexed_results[item["_index"]] = {
                         "task_id": item.get("task_id"),
                         "uid": uid,
@@ -582,7 +702,7 @@ def main() -> int:
             results = _crawl_from_uids(
                 valid_items,
                 config=config,
-                selector_module=module or inferred_module,
+                selector_module=bucket_module,
                 max_workers_override=args.max_workers,
                 cli_args=args,
                 cookies_override=group.get("cookies"),

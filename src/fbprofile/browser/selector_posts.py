@@ -19,11 +19,12 @@ from ..storage.ndjson import append_ndjson
 from ..utils import _norm_link
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+MODULES_DIR = REPO_ROOT / "configs" / "modules"
 MODULE_SELECTOR_CONFIG_PATHS = {
-    "profile": Path(__file__).resolve().parents[1] / "configs" / "modules" / "profile.json",
-    # "group": Path(__file__).resolve().parents[1] / "configs" / "modules" / "group.json",
-    "group": "/home/baoanh/Desktop/fb_crawler/selenium_crawl_fb/configs/modules/group.json"
-
+    "profile": MODULES_DIR / "profile.json",
+    "page": MODULES_DIR / "page.json",
+    "group": MODULES_DIR / "group.json",
 }
 
 POST_CONTAINER_SELECTORS = (
@@ -39,6 +40,9 @@ COMMENT_DEBUG_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "logs" / "comm
 @lru_cache(maxsize=None)
 def _load_selector_config(module_name: str) -> dict:
     config_path = MODULE_SELECTOR_CONFIG_PATHS.get(module_name) or MODULE_SELECTOR_CONFIG_PATHS["profile"]
+    if not Path(config_path).exists():
+        logger.debug("[SEL] selector config not found for module=%s path=%s", module_name, config_path)
+        config_path = MODULE_SELECTOR_CONFIG_PATHS["profile"]
     with open(config_path, "r", encoding="utf-8") as config_file:
         return validate_selector_payload(json.load(config_file))
 
@@ -420,13 +424,20 @@ def _extract_url_digits(url: str) -> Optional[str]:
     if not url or not isinstance(url, str):
         return None
     try:
-        path = urlparse(url).path or ""
+        parsed = urlparse(url)
+        path = parsed.path or ""
+        query = parse_qs(parsed.query or "")
     except Exception:
         return None
 
-    match = re.search(r"/(?:posts|permalink|reel)/(\d+)", path.lower())
+    match = re.search(r"/(?:posts|permalink|reel)/([A-Za-z0-9_-]+)", path)
     if match:
         return match.group(1)
+
+    for key in ("story_fbid", "fbid", "photo_id", "video_id", "v"):
+        value = query.get(key, [None])[0]
+        if value:
+            return str(value)
 
     return None
 
@@ -443,6 +454,23 @@ def _clean_fb_link(url: str) -> str:
         return f"{parsed.scheme or 'https'}://{parsed.netloc}{parsed.path}".rstrip("/")
     except Exception:
         return url
+
+
+def _is_post_permalink_href(href: str) -> bool:
+    if not href:
+        return False
+    href_lower = href.lower()
+    markers = (
+        "/posts/",
+        "/permalink/",
+        "permalink.php",
+        "story.php",
+        "story_fbid=",
+        "photo.php",
+        "/videos/",
+        "/reel/",
+    )
+    return any(marker in href_lower for marker in markers)
 
 
 def _parse_engagement_count(raw_value: Any) -> int:
@@ -714,7 +742,7 @@ def _extract_post_link(post_element, source_url: str) -> str:
         try:
             href = element.get_attribute("href") or ""
             href = _clean_fb_link(href)
-            if _norm_link(href) or _extract_url_digits(href):
+            if _is_post_permalink_href(href) or _norm_link(href) or _extract_url_digits(href):
                 return href
         except Exception:
             continue
@@ -784,46 +812,48 @@ def get_post_timestamp_and_id(driver, post_element, source_url: str) -> dict:
                 if not href:
                     continue
 
-                if "facebook.com/groups" in href and "/posts/" in href:
-                    result["timestamp_url"] = href
+                if not _is_post_permalink_href(href):
+                    continue
 
-                    # ✅ Ưu tiên lấy từ aria-label hoặc title (không bị nhiễu)
-                    timestamp_text = (
-                        el.get_attribute("aria-label")
-                        or el.get_attribute("title")
-                        or ""
-                    )
+                clean_href = _clean_fb_link(href)
+                result["timestamp_url"] = clean_href or href
 
-                    # ✅ Fallback: lấy text từ element con <abbr> hoặc <span>
-                    if not timestamp_text:
-                        try:
-                            abbr = el.find_element(By.TAG_NAME, "abbr")
-                            timestamp_text = abbr.get_attribute("title") or abbr.text
-                        except Exception:
-                            pass
+                timestamp_text = (
+                    el.get_attribute("aria-label")
+                    or el.get_attribute("title")
+                    or ""
+                )
 
-                    # ✅ Fallback cuối: dùng tooltip sau khi hover
-                    if not timestamp_text:
-                        try:
-                            tooltip = driver.find_element(
-                                By.CSS_SELECTOR, "[role='tooltip']"
-                            )
-                            timestamp_text = tooltip.text
-                        except Exception:
-                            pass
+                if not timestamp_text:
+                    try:
+                        abbr = el.find_element(By.TAG_NAME, "abbr")
+                        timestamp_text = abbr.get_attribute("title") or abbr.text
+                    except Exception:
+                        pass
 
-                    result["timestamp_text"] = timestamp_text.strip()
+                if not timestamp_text:
+                    try:
+                        timestamp_text = el.text or ""
+                    except Exception:
+                        timestamp_text = ""
 
-                    # Extract post_id
-                    parts = href.split("/")
-                    if "posts" in parts:
-                        idx = parts.index("posts")
-                        if idx + 1 < len(parts):
-                            post_id = parts[idx + 1].split("?")[0]
-                            result["post_id"] = post_id
-                            result["post_id_raw"] = post_id
+                if not timestamp_text:
+                    try:
+                        tooltip = driver.find_element(
+                            By.CSS_SELECTOR, "[role='tooltip']"
+                        )
+                        timestamp_text = tooltip.text
+                    except Exception:
+                        pass
 
-                    break
+                result["timestamp_text"] = timestamp_text.strip()
+
+                post_id = _extract_url_digits(href) or _extract_url_digits(clean_href)
+                if post_id:
+                    result["post_id"] = post_id
+                    result["post_id_raw"] = post_id
+
+                break
 
             except Exception:
                 continue
@@ -1072,15 +1102,18 @@ def _extract_selector_post_context(driver, post_element, group_url: str) -> Dict
     engagement_counts, reaction_breakdown = _extract_engagement_counts(post_element, group_url)
     content = _extract_content(driver, post_element, group_url)
     timestamp_info = get_post_timestamp_and_id(driver, post_element, group_url)
+    post_link = timestamp_info["timestamp_url"] or _extract_post_link(post_element, group_url)
+    post_id = timestamp_info["post_id"] or _extract_url_digits(post_link) or ""
+    post_id_raw = timestamp_info["post_id_raw"] or post_id
     # Phase 1: chỉ thu metadata + post link. Comment chi tiết sẽ cào ở phase 2
     # để tránh driver.get(post_link) làm stale DOM khi đang duyệt nhiều post.
     comments: list[dict] = []
     
     item = {
-        "id": timestamp_info["post_id"],
-        "rid": timestamp_info["post_id_raw"],
+        "id": post_id,
+        "rid": post_id_raw,
         "type": "story",
-        "link": timestamp_info["timestamp_url"],
+        "link": post_link,
         "author_id": author.get("id", ""),
         "author": author.get("name", ""),
         "author_link": author.get("url", ""),
@@ -1155,30 +1188,67 @@ def process_visible_selector_posts(
     logger.info("[SEL%s] wrote %d fresh posts", log_prefix, len(fresh))
     return len(fresh)
 
+def _collect_feed_article_elements(driver):
+    try:
+        elements = driver.execute_script(
+            """
+            const postLinkSelector = [
+              "a[href*='/posts/']",
+              "a[href*='/permalink/']",
+              "a[href*='story_fbid=']",
+              "a[href*='story.php']",
+              "a[href*='photo.php']",
+              "a[href*='/videos/']",
+              "a[href*='/reel/']"
+            ].join(",");
+            const actionPattern = /(thích|bình luận|chia sẻ|like|comment|share)/i;
+            const externalLinkPattern = /(https?:\/\/|s\.shopee\.vn|shopee\.vn)/i;
+            return Array.from(document.querySelectorAll("div[role='article']"))
+              .filter(el => {
+                if (!el || el.closest("[role='dialog']")) return false;
+                const rect = el.getBoundingClientRect();
+                if (!rect || rect.width < 120 || rect.height < 80) return false;
+                const text = (el.innerText || "").trim();
+                if (text.length < 10) return false;
+                const hasPostLink = Boolean(el.querySelector(postLinkSelector));
+                const feedLike = Boolean(el.closest("[data-pagelet^='FeedUnit_'], [aria-posinset], [data-ft]"));
+                return hasPostLink || externalLinkPattern.test(text) || (feedLike && (actionPattern.test(text) || text.length > 120));
+              });
+            """
+        )
+        return elements if isinstance(elements, list) else []
+    except Exception as exc:
+        logger.debug("[SEL] feed article collection failed: %s", exc)
+        return []
+
+
 def collect_visible_selector_posts(driver, source_url: str):
     seen = []
     unique_ids = set()
 
+    elements = _collect_feed_article_elements(driver)
+
     # Case 1: dialog trong feed
-    elements = driver.find_elements(
+    media_elements = driver.find_elements(
         By.CSS_SELECTOR,
         "div[role='dialog'][aria-label='Trình xem ảnh'] div[role='complementary']"
     )
 
     # Case 2: navigate thẳng driver.get → photo URL
-    if not elements:
-        elements = driver.find_elements(
+    if not media_elements:
+        media_elements = driver.find_elements(
             By.CSS_SELECTOR,
             "div[role='complementary']"
         )
 
     # Case 3: fallback
-    if not elements:
-        elements = driver.find_elements(
+    if not media_elements:
+        media_elements = driver.find_elements(
             By.CSS_SELECTOR,
             "[data-name='media-viewer-nav-container']"
         )
 
+    elements.extend(media_elements)
     elements = _keep_outermost_elements(driver, elements)
 
     for element in elements:

@@ -19,10 +19,10 @@ from src.fbprofile.storage.paths import compute_paths
 from src.fbprofile.browser.hooks import flush_gql_recs, install_early_hook
 from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
 from src.fbprofile.browser.navigation import go_to_date
-from src.fbprofile.browser.scroll import crawl_scroll_loop
+from src.fbprofile.browser.scroll import crawl_scroll_loop, drain_pending_gql_records
 from src.fbprofile.storage.checkpoint import save_checkpoint
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = str(Path(__file__).resolve().parent)
 
 from src.utils import (
     build_port_queue,
@@ -519,6 +519,7 @@ def crawl_urls_batch(
     selector_debug_cfg_profile: Dict[str, Any] | None,
     selector_debug_cfg_page: Dict[str, Any] | None,
     scroll_until_stable_cfg: Dict[str, Any] | None = None,
+    run_generic_selector_after_info: bool = False,
     profile_backup_name: str | None = None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
@@ -561,6 +562,10 @@ def crawl_urls_batch(
                 chrome_binary_win_path=chrome_binary_win_path,
                 chrome_binary_candidates=chrome_binary_candidates,
                 profile_backup_name=profile_backup_name,
+                early_hook_installer=lambda active_driver: install_early_hook(
+                    active_driver,
+                    keep_last=1000,
+                ),
             )
         except Exception as exc:
             logger.error("[worker %s] Login failed: %s", worker_id, exc)
@@ -599,21 +604,23 @@ def crawl_urls_batch(
                 if not url_name: url_name = str(url)
 
                 resolved_entity_type = requested_entity_type or selector_module
+                target_loaded_before_timeline = False
                 logger.info(
                     "[worker %s] Resolved entity type for %s: %s",
                     worker_id,
                     url,
                     resolved_entity_type or "unknown",
                 )
-                install_early_hook(driver, keep_last=350)
                 if (
                     resolved_entity_type not in {"profile", "page", "group"}
                     and elements_cfg_profile is not None
                     and elements_cfg_page is not None
                 ):
+                    install_early_hook(driver, keep_last=1000)
                     driver.get(url)
                     wait_for_page_ready(driver, 20)
                     wait_for_seconds(driver, wait_after_load)
+                    target_loaded_before_timeline = True
                     resolved_entity_type = _detect_entity_type_from_dom(driver)
                     logger.info(
                         "[worker %s] DOM fallback resolved %s as %s",
@@ -624,6 +631,7 @@ def crawl_urls_batch(
 
                 profile_data = None
                 page_info_data = None
+                group_info_data = None
                 # Compute output paths only after entity type resolution so
                 # checkpoints and dumps land under the correct directory.
                 data_root = str(Path(PROJECT_ROOT) / "database")
@@ -634,146 +642,115 @@ def crawl_urls_batch(
                 profile_info_path = database_path / "profile_info.json"
                 page_info_path = database_path / "page_info.json"
                 group_info_path = database_path / "group_info.json"
+                seen_ids = set()
+                ts_state = {"latest": None, "earliest": None}
 
-                if resolved_entity_type == "profile":
-                    profile_data = scrape_full_profile_info(
-                        driver,
-                        url,
-                        profile_info_path,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
-                    )
-                    # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
-                    # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
-                    driver.get(url)
-                    wait_for_page_ready(driver, 20)
-                    wait_for_seconds(driver, wait_after_load)
-                    flush_gql_recs(driver)
+                # if resolved_entity_type == "profile":
+                #     profile_data = scrape_full_profile_info(
+                #         driver,
+                #         url,
+                #         profile_info_path,
+                #         scroll_until_stable_cfg=scroll_until_stable_cfg,
+                #     )
+                #     data["profile_info"] = profile_data
+                # elif resolved_entity_type == "page":
+                #     try:
+                #         from src.fbprofile.browser.get_page_info import scrape_full_page_info
+                #     except ImportError as exc:
+                #         raise RuntimeError(
+                #             "Missing page scraper: src.fbprofile.browser.get_page_info"
+                #         ) from exc
+                #     page_info_data = scrape_full_page_info(
+                #         driver,
+                #         url,
+                #         page_info_path,
+                #         scroll_until_stable_cfg=scroll_until_stable_cfg,
+                #     )
+                #     data["page_info"] = page_info_data
 
-                    seen_ids = set()
-                    ts_state = {"latest": None, "earliest": None}
-
-                    crawl_scroll_loop(
-                        driver,
-                        group_url=url,
-                        out_path=out_ndjson,
-                        seen_ids=seen_ids,
-                        keep_last=350,
-                        max_scrolls=10000,
-                        ts_state=ts_state,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
-                    )
-
-                    if ts_state["latest"] is not None:
-                        save_checkpoint(checkpoint, ts_state["latest"])
-                    
-                    posts_data = []
-                    if out_ndjson.exists():
-                        try:
-                            import json
-                            with open(out_ndjson, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if line:
-                                        posts_data.append(json.loads(line))
-                        except Exception as e:
-                            logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
-
-                    data["profile_info"] = profile_data
-                    data["posts"] = posts_data
-                    data["posts_collected"] = len(seen_ids)
-                    # page_data["output_ndjson"] = str(out_ndjson)
-                elif resolved_entity_type == "page":
-                    try:
-                        from src.fbprofile.browser.get_page_info import scrape_full_page_info
-                    except ImportError as exc:
-                        raise RuntimeError(
-                            "Missing page scraper: src.fbprofile.browser.get_page_info"
-                        ) from exc
-                    page_info_data = scrape_full_page_info(
-                        driver,
-                        url,
-                        page_info_path,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
-                    )
-                    # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
-                    # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
-                    driver.get(url)
-                    wait_for_page_ready(driver, 20)
-                    wait_for_seconds(driver, wait_after_load)
-                    flush_gql_recs(driver)
-
-                    seen_ids = set()
-                    ts_state = {"latest": None, "earliest": None}
-
-                    crawl_scroll_loop(
+                # elif resolved_entity_type == "group":
+                #     try:
+                #         from src.fbprofile.browser.get_group_info import scrape_full_group_info
+                #     except ImportError as exc:
+                #         raise RuntimeError(
+                #             "Missing page scraper: src.fbprofile.browser.get_page_info"
+                #         ) from exc
+                #     group_info_data = scrape_full_group_info(
+                #         driver,
+                #         url,
+                #         group_info_path,
+                #         max_pages=1,
+                #         photo_limit=2,
+                #         scroll_until_stable_cfg=scroll_until_stable_cfg,
+                #     )
+                #     data["group_info"] = group_info_data
+                # else:
+                #     logger.info(
+                #         "[worker %s] Skipping specialized profile/page scraper for %s",
+                #         worker_id,
+                #         url,
+                #     )
+                if target_loaded_before_timeline and target_date is None:
+                    drain_pending_gql_records(
                         driver,
                         group_url=url,
                         out_path=out_ndjson,
                         seen_ids=seen_ids,
-                        keep_last=350,
-                        max_scrolls=10000,
+                        log_prefix="#info",
                         ts_state=ts_state,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
                     )
-
-                    if ts_state["latest"] is not None:
-                        save_checkpoint(checkpoint, ts_state["latest"])
-                    
-                    posts_data = []
-                    if out_ndjson.exists():
-                        try:
-                            import json
-                            with open(out_ndjson, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if line:
-                                        posts_data.append(json.loads(line))
-                        except Exception as e:
-                            logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
-
-                    
-                    data["page_info"] = page_data
-                    data["posts"] = posts_data
-                    data["posts_collected"] = len(seen_ids)
-
-                elif resolved_entity_type == "group":
-                    try:
-                        from src.fbprofile.browser.get_group_info import scrape_full_group_info
-                    except ImportError as exc:
-                        raise RuntimeError(
-                            "Missing page scraper: src.fbprofile.browser.get_page_info"
-                        ) from exc
-                    group_data = scrape_full_group_info(
+                else:
+                    flush_gql_recs(driver)
+                run_generic_selector = (
+                    run_generic_selector_after_info
+                    or resolved_entity_type not in {"profile", "page", "group"}
+                )
+                if run_generic_selector:
+                    page_data = crawl_page(
                         driver,
                         url,
-                        group_info_path,
-                        max_pages=1,
-                        photo_limit=2,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
+                        resolved_entity_type,
+                        elements_cfg,
+                        elements_cfg_profile,
+                        elements_cfg_page,
+                        wait_after_load,
+                        element_timeout,
+                        default_wait_cfg,
+                        default_wait_cfg_profile,
+                        default_wait_cfg_page,
+                        selector_debug_cfg,
+                        selector_debug_cfg_profile,
+                        selector_debug_cfg_page,
                     )
-                    data["group_info"] = group_data
+                    target_loaded_before_timeline = True
                 else:
                     logger.info(
-                        "[worker %s] Skipping specialized profile/page scraper for %s",
+                        "[worker %s] Skip generic selectors after specialized %s scraper for %s",
                         worker_id,
+                        resolved_entity_type,
                         url,
                     )
-                page_data = crawl_page(
-                    driver,
-                    url,
-                    resolved_entity_type,
-                    elements_cfg,
-                    elements_cfg_profile,
-                    elements_cfg_page,
-                    wait_after_load,
-                    element_timeout,
-                    default_wait_cfg,
-                    default_wait_cfg_profile,
-                    default_wait_cfg_page,
-                    selector_debug_cfg,
-                    selector_debug_cfg_profile,
-                    selector_debug_cfg_page,
-                )
+                    page_data = {
+                        "url": url,
+                        "resolved_entity_type": resolved_entity_type,
+                    }
+                    install_early_hook(driver, keep_last=350)
+                    driver.get(url)
+                    wait_for_page_ready(driver, 20)
+                    wait_for_seconds(driver, wait_after_load)
+                    target_loaded_before_timeline = True
+                if target_loaded_before_timeline:
+                    if target_date is None:
+                        drain_pending_gql_records(
+                            driver,
+                            group_url=url,
+                            out_path=out_ndjson,
+                            seen_ids=seen_ids,
+                            log_prefix="#load",
+                            ts_state=ts_state,
+                        )
+                    else:
+                        flush_gql_recs(driver)
                 if target_date and "group" not in url:
                     try:
                         go_to_date(driver, target_date)
@@ -783,8 +760,7 @@ def crawl_urls_batch(
                 elif target_date is None:
                     logger.info("[worker %s] Skip go_to_date for %s: no date provided", worker_id, url)
 
-                seen_ids = set()
-                ts_state = {"latest": None, "earliest": None}
+                install_early_hook(driver, keep_last=350)
 
                 crawl_scroll_loop(
                     driver,
@@ -868,10 +844,13 @@ def crawl_urls_batch(
                 page_data["profile_info"] = profile_data
                 if resolved_entity_type == "page":
                     page_data["page_info"] = page_info_data
+                elif resolved_entity_type == "group":
+                    page_data["group_info"] = group_info_data
                 page_data["posts"] = posts_data
                 page_data["posts_collected"] = len(posts_data)
                 page_data["posts_collected_current_run"] = len(seen_ids)
                 page_data["output_ndjson"] = str(out_ndjson)
+                data = page_data
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
                 data = {"url": url, "error": str(exc)}

@@ -56,20 +56,21 @@ def iter_json_values(s: str):
         if not m:
             break
         j = i + m.start()
+        rest = s[j:]
+        stripped = _strip_xssi_prefix(rest)
+        if stripped != rest:
+            j += len(rest) - len(stripped)
+        if j >= n:
+            break
         try:
             obj, k = dec.raw_decode(s, j)
             yield obj
             i = k
         except json.JSONDecodeError:
-            chunk = _strip_xssi_prefix(s[j:])
-            if chunk == s[j:]:
+            m_next = re.search(r'[\{\[]', s[j + 1:])
+            if not m_next:
                 break
-            try:
-                obj, k_rel = dec.raw_decode(chunk, 0)
-                yield obj
-                i = j + k_rel
-            except json.JSONDecodeError:
-                break
+            i = j + 1 + m_next.start()
 
 
 def choose_best_graphql_obj(objs):
@@ -87,9 +88,10 @@ def parse_fb_graphql_payload(text: str):
 
     cleaned = _strip_xssi_prefix(text)
     objs = list(iter_json_values(cleaned))
-    payload = choose_best_graphql_obj(objs) if objs else None
-    if payload is not None:
-        return payload
+    if len(objs) == 1:
+        return objs[0]
+    if len(objs) > 1:
+        return objs
 
     try:
         return json.loads(cleaned)
