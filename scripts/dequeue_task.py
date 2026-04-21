@@ -1,71 +1,104 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
-import requests
+import json
 import os
-import shlex
-import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from src.utils import load_env_file
-DEFAULT_DEQUEUE_URL = load_env_file(".env").get("DEQUEUE_URL", "https://latex-card-walk-donor.trycloudflare.com/tasks/dequeue?social_type=facebook&version=1.0")
+from typing import Any
+
+import requests
+
+from src.utils import build_service_url, load_env_file
+
+DEFAULT_DEQUEUE_PATH = "/tasks/dequeue?social_type=facebook&version=1.0"
 
 
-def _load_env_value(key: str, default: str = "") -> str:
-    env_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        ".env",
-    )
-    if not os.path.exists(env_path):
-        return default
+@dataclass(frozen=True)
+class DequeueResult:
+    ok: bool
+    status_code: int
+    payload: dict[str, Any] | None = None
+    text: str = ""
+    error: str = ""
+    url: str = ""
 
-    with open(env_path, "r", encoding="utf-8") as file:
-        for raw_line in file:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            current_key, value = line.split("=", 1)
-            if current_key.strip() == key:
-                return value.strip().strip('"').strip("'")
-    return default
+    def json(self) -> dict[str, Any]:
+        return self.payload or {}
 
 
-def _build_service_url(
-    *,
-    path: str,
-    root_key: str = "SERVICE_ROOT_URL",
-    explicit_key: str | None = None,
-    fallback: str = "",
-) -> str:
-    if explicit_key:
-        explicit_value = _load_env_value(explicit_key, "").strip()
-        if explicit_value:
-            return explicit_value
-
-    root_value = _load_env_value(root_key, "").strip().rstrip("/")
-    if root_value:
-        return f"{root_value}/{path.lstrip('/')}"
-
-    return fallback
+def resolve_dequeue_url() -> str:
+    env = load_env_file(".env")
+    url = build_service_url(
+        env,
+        path=DEFAULT_DEQUEUE_PATH,
+        explicit_key="DEQUEUE_URL",
+        fallback="",
+    ).strip()
+    if not url:
+        raise ValueError("Missing DEQUEUE_URL or SERVICE_ROOT_URL for dequeue request.")
+    return url
 
 
-def run_request(api_key: str):
-    # nếu bạn muốn override như code cũ
-    url = DEFAULT_DEQUEUE_URL
+def run_request(api_key: str, url: str | None = None, timeout: int = 10) -> DequeueResult:
+    resolved_url = url or resolve_dequeue_url()
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(resolved_url, headers=headers, timeout=timeout)
+        response_text = response.text or ""
+        payload: dict[str, Any] | None = None
+        if response_text.strip():
+            try:
+                parsed = response.json()
+                if not isinstance(parsed, dict):
+                    return DequeueResult(
+                        ok=False,
+                        status_code=response.status_code,
+                        text=response_text,
+                        error="Dequeue response JSON must be an object.",
+                        url=resolved_url,
+                    )
+                payload = parsed
+            except ValueError as exc:
+                return DequeueResult(
+                    ok=False,
+                    status_code=response.status_code,
+                    text=response_text,
+                    error=f"Invalid JSON response: {exc}",
+                    url=resolved_url,
+                )
 
-        # raise exception nếu status != 200
-        response.raise_for_status()
-        return response  # hoặc response.json()
-    
+        if not response.ok:
+            return DequeueResult(
+                ok=False,
+                status_code=response.status_code,
+                payload=payload,
+                text=response_text,
+                error=response_text.strip() or response.reason,
+                url=resolved_url,
+            )
+
+        return DequeueResult(
+            ok=True,
+            status_code=response.status_code,
+            payload=payload or {},
+            text=response_text,
+            url=resolved_url,
+        )
     except requests.exceptions.RequestException as e:
-        print(f"Request error: {e}")
-        return None
+        return DequeueResult(
+            ok=False,
+            status_code=0,
+            error=str(e),
+            url=resolved_url,
+        )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -87,18 +120,29 @@ def main() -> int:
         print("Missing API key. Provide --api-key or set API_KEY env var.", file=sys.stderr)
         return 2
 
-    result = run_request(args.api_key)
+    try:
+        result = run_request(args.api_key)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     header = (
         f"timestamp_utc={timestamp}\n"
-        f"exit_code={result.returncode}\n"
-        f"stderr={result.stderr.strip()}\n"
-        f"command=curl -X POST <url> -H 'accept: application/json' "
+        f"ok={str(result.ok).lower()}\n"
+        f"status_code={result.status_code}\n"
+        f"error={result.error}\n"
+        f"url={result.url}\n"
+        f"command=curl -X GET <url> -H 'accept: application/json' "
         f"-H 'Authorization: Bearer ***'\n"
     )
 
-    output = header + "\n" + (result.stdout or "")
+    body = (
+        json.dumps(result.json(), ensure_ascii=False, indent=2)
+        if result.payload is not None
+        else result.text
+    )
+    output = header + "\n" + body
 
     try:
         with open(args.out, "w", encoding="utf-8") as f:
@@ -107,13 +151,12 @@ def main() -> int:
         print(f"Failed to write output file: {e}", file=sys.stderr)
         return 3
 
-    # Also print response body to stdout for immediate visibility
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
+    if body:
+        print(body)
+    if result.error:
+        print(result.error, file=sys.stderr)
 
-    return result.returncode
+    return 0 if result.ok else 1
 
 if __name__ == "__main__":
     sys.exit(main())

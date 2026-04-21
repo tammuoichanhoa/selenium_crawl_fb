@@ -9,7 +9,7 @@ import subprocess  # spawn/terminate Chrome process
 import sys  # platform detection
 import time  # retry/sleep timing
 import logging
-from typing import Iterable, List, Optional, Tuple  # type hints
+from typing import Callable, Iterable, List, Optional, Tuple  # type hints
 from urllib.parse import urlparse  # parse URLs for logging/host extraction
 
 from selenium import webdriver  # Selenium driver classes
@@ -424,6 +424,7 @@ def create_logged_in_driver(
     profile_backup_name: str | None = None,
     window_size: Optional[Tuple[int, int]] = None,
     window_position: Optional[Tuple[int, int]] = None,
+    early_hook_installer: Optional[Callable[[webdriver.Chrome], None]] = None,
 ):
     """Create a driver and verify login via cookies or profile."""
     driver = create_local_driver(
@@ -441,6 +442,13 @@ def create_logged_in_driver(
     )
     print("Create driver done")
     try:
+        if early_hook_installer is not None:
+            try:
+                early_hook_installer(driver)
+                logger.info("[DRIVER] Early browser hook installed before login navigation.")
+            except Exception as exc:
+                logger.warning("[DRIVER] Failed to install early browser hook: %s", exc)
+
         if login_method == "cookies":
             ok = login_facebook_with_cookies(
                 driver,
