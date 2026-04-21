@@ -1,5 +1,5 @@
 import json
-with open("/home/baoanh/Downloads/Telegram Desktop/crawler_2_3_26/cookies.txt","r",encoding="utf-8") as f:
+with open("/home/baoanh/Desktop/crawler/selenium_crawl_fb/groups/cookies.txt","r",encoding="utf-8") as f:
     data = json.load(f)
 cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in data)
 with open("cookie_string.txt","w",encoding="utf-8") as f:

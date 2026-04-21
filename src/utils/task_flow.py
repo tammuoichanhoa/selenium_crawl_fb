@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from scripts.crawler import _normalize_selector_modules
+from selenium_crawl_fb.crawler import _normalize_selector_modules
 
 from .env import str_to_bool
 from .selector_remote import resolve_selector_payload
@@ -52,6 +51,15 @@ def derive_step_status(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     }
 
 
+import json
+import logging
+from typing import Any, Dict
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+
 def post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, Any]) -> None:
     payload = {
         "task_id": task_id,
@@ -60,30 +68,40 @@ def post_event(api_key: str, event_url: str, task_id: str, result: Dict[str, Any
             "steps": derive_step_status(result),
         },
     }
-    cmd = [
-        "curl",
-        "-sS",
-        "-X",
-        "POST",
-        event_url,
-        "-H",
-        "Content-Type: application/json",
-        "-H",
-        f"Authorization: Bearer {api_key}",
-        "-d",
-        json.dumps(payload, ensure_ascii=False),
-    ]
-    response = subprocess.run(cmd, capture_output=True, text=True)
-    if response.returncode != 0:
-        logger.error(
-            "[event] Failed to post task_id=%s: %s",
-            task_id,
-            response.stderr.strip(),
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        response = requests.post(
+            event_url,
+            headers=headers,
+            json=payload,
+            timeout=30,
         )
-    elif response.stdout.strip():
-        logger.info("[event] Response for task_id=%s: %s", task_id, response.stdout.strip())
+        response.raise_for_status()
 
+        if response.text.strip():
+            logger.info(
+                "[event] Response for task_id=%s: %s",
+                task_id,
+                response.text.strip(),
+            )
 
+    except requests.RequestException as e:
+        response_text = ""
+        if getattr(e, "response", None) is not None and e.response is not None:
+            response_text = e.response.text.strip()
+
+        logger.error(
+            "[event] Failed to post task_id=%s: %s%s",
+            task_id,
+            str(e),
+            f" | response={response_text}" if response_text else "",
+        )
+        
 def extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     items = payload.get("items")
     if not isinstance(items, list) or not items:
@@ -166,6 +184,9 @@ def infer_selector_module(
                 [str(value).lower() for value in types if value is not None]
             )
 
+    if any("group" in value for value in crawl_types):
+        if "group" in selector_modules:
+            return "group"
     if any("profile" in value for value in crawl_types):
         if "profile" in selector_modules:
             return "profile"
@@ -173,10 +194,21 @@ def infer_selector_module(
         if "page" in selector_modules:
             return "page"
 
+    for item in items:
+        inferred_type = infer_fb_type_from_url(item.get("uid"))
+        if inferred_type == "group" and "group" in selector_modules:
+            return "group"
+        if inferred_type == "profile" and "profile" in selector_modules:
+            return "profile"
+        if inferred_type == "page" and "page" in selector_modules:
+            return "page"
+
     if "profile" in selector_modules:
         return "profile"
     if "page" in selector_modules:
         return "page"
+    if "group" in selector_modules:
+        return "group"
 
     if selector_modules:
         return next(iter(selector_modules.keys()))

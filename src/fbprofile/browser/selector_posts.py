@@ -1,12 +1,17 @@
 import json
 import re
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlparse
-
-from selenium.common.exceptions import StaleElementReferenceException
+from time import sleep, time
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver import ActionChains
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from logs.loging_config import logger
 from src.utils.selectors import resolve_locator, validate_selector_payload
@@ -14,25 +19,33 @@ from ..storage.ndjson import append_ndjson
 from ..utils import _norm_link
 
 
-PROFILE_SELECTOR_CONFIG_PATH = (
-    Path(__file__).resolve().parents[3] / "configs" / "modules" / "profile.json"
-)
+MODULE_SELECTOR_CONFIG_PATHS = {
+    "profile": Path(__file__).resolve().parents[1] / "configs" / "modules" / "profile.json",
+    # "group": Path(__file__).resolve().parents[1] / "configs" / "modules" / "group.json",
+    "group": "/home/baoanh/Desktop/fb_crawler/selenium_crawl_fb/configs/modules/group.json"
+
+}
 
 POST_CONTAINER_SELECTORS = (
-    "div[data-pagelet*='FeedUnit']",
-    "div[role='article']",
-    "div[aria-posinset]",
+    "[data-name='media-viewer-nav-container']",
+    "div[role='dialog'] div[role='complementary']",       # broad fallback inside photo viewer
+    # "div[role='article']",  ← bỏ cái này, match nhầm comment
 )
+COMMENT_DEBUG_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "logs" / "comment_selector_debug.txt"
 
-
-@lru_cache(maxsize=1)
-def _load_profile_selector_config() -> dict:
-    with open(PROFILE_SELECTOR_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+# ===========================================================================
+#                   LIBS  
+# ===========================================================================
+@lru_cache(maxsize=None)
+def _load_selector_config(module_name: str) -> dict:
+    config_path = MODULE_SELECTOR_CONFIG_PATHS.get(module_name) or MODULE_SELECTOR_CONFIG_PATHS["profile"]
+    with open(config_path, "r", encoding="utf-8") as config_file:
         return validate_selector_payload(json.load(config_file))
 
 
 def _build_locator_chain(selector_name: str) -> List[Dict[str, Any]]:
-    selector_cfg = _load_profile_selector_config().get("elements", {}).get(selector_name)
+    module_name = selector_name.split(".", 1)[0] if "." in selector_name else "profile"
+    selector_cfg = _load_selector_config(module_name).get("elements", {}).get(selector_name)
     if not isinstance(selector_cfg, dict):
         return []
 
@@ -48,25 +61,115 @@ def _build_locator_chain(selector_name: str) -> List[Dict[str, Any]]:
     return locators
 
 
+def _resolve_post_selector_namespace(source_url: str) -> str:
+    if isinstance(source_url, str) and "/groups/" in source_url:
+        return "group"
+    return "profile"
+
+
+def _post_selector(selector_suffix: str, source_url: str) -> str:
+    return f"{_resolve_post_selector_namespace(source_url)}.posts.{selector_suffix}"
+
+
+def _read_element_text(element) -> tuple[str, str]:
+    """Đọc text của 1 `WebElement`, kèm nguồn (`text`/`textContent`/`innerText`)."""
+    try:
+        text = (element.text or "").strip()
+    except Exception:
+        text = ""
+    if text:
+        return re.sub(r"\s+", " ", text).strip(), "text"
+
+    for attr in ("textContent", "innerText"):
+        try:
+            raw_value = element.get_attribute(attr)
+        except Exception:
+            raw_value = ""
+        normalized = re.sub(r"\s+", " ", (raw_value or "")).strip()
+        if normalized:
+            return normalized, attr
+
+    return "", ""
+
+
+def _locator_debug_repr(locator: Dict[str, Any]) -> str:
+    locator_type = locator.get("type") or locator.get("by") or locator.get("strategy") or "css"
+    value = locator.get("value") or locator.get("selector") or ""
+    return f"{locator_type}={value}"
+
+
 def _safe_text(root, selectors: List[str], selector_name: str | None = None) -> str:
     if selector_name:
         for locator in _build_locator_chain(selector_name):
             try:
                 by, value = resolve_locator(locator)
                 element = root.find_element(by, value)
-                text = (element.text or "").strip()
+                text, text_source = _read_element_text(element)
+
                 if text:
+                    if text_source != "text":
+                        logger.debug(
+                            "[SEL] selector=%s locator=%s used_fallback=%s value=%r",
+                            selector_name,
+                            _locator_debug_repr(locator),
+                            text_source,
+                            text,
+                        )
                     return text
-            except Exception:
+                logger.debug(
+                    "[SEL] selector=%s locator=%s found element but text empty",
+                    selector_name,
+                    _locator_debug_repr(locator),
+                )
+            except NoSuchElementException:
+                logger.debug(
+                    "[SEL] selector=%s locator=%s not found",
+                    selector_name,
+                    _locator_debug_repr(locator),
+                )
+                continue
+            except Exception as exc:
+                logger.debug(
+                    "[SEL] selector=%s locator=%s failed: %s",
+                    selector_name,
+                    _locator_debug_repr(locator),
+                    exc,
+                )
                 continue
 
     for selector in selectors:
         try:
             element = root.find_element(By.CSS_SELECTOR, selector)
-            text = (element.text or "").strip()
+            text, text_source = _read_element_text(element)
             if text:
+                if text_source != "text":
+                    logger.debug(
+                        "[SEL] selector=%s fallback_css=%s used_fallback=%s value=%r",
+                        selector_name or "<inline>",
+                        selector,
+                        text_source,
+                        text,
+                    )
                 return text
-        except Exception:
+            logger.debug(
+                "[SEL] selector=%s fallback_css=%s found element but text empty",
+                selector_name or "<inline>",
+                selector,
+            )
+        except NoSuchElementException:
+            logger.debug(
+                "[SEL] selector=%s fallback_css=%s not found",
+                selector_name or "<inline>",
+                selector,
+            )
+            continue
+        except Exception as exc:
+            logger.debug(
+                "[SEL] selector=%s fallback_css=%s failed: %s",
+                selector_name or "<inline>",
+                selector,
+                exc,
+            )
             continue
     return ""
 
@@ -95,13 +198,26 @@ def _safe_attr(root, selectors: List[str], attr: str, selector_name: str | None 
             continue
     return ""
 
-
 def _safe_find_elements(root, selectors: List[str], selector_name: str | None = None):
+    """
+    Tìm nhiều phần tử một cách “an toàn” (không throw ra ngoài).
+
+    Ưu tiên:
+    1) Nếu có `selector_name`: thử lần lượt các locator sinh từ `_build_locator_chain(selector_name)`
+       (mỗi locator được `resolve_locator()` -> (by, value)). Nếu tìm thấy >=1 phần tử thì trả ngay.
+    2) Nếu không thấy theo locator chain: thử lần lượt các CSS selector trong `selectors`.
+       Nếu tìm thấy >=1 phần tử thì trả ngay.
+
+    Kết quả:
+    - Trả về `List[WebElement]` (có thể rỗng).
+    - Nuốt mọi exception trong quá trình find để luồng crawl không bị dừng.
+    """
     if selector_name:
         for locator in _build_locator_chain(selector_name):
             try:
                 by, value = resolve_locator(locator)
                 elements = root.find_elements(by, value)
+                # logger.info("Len>>>>>> ", len(elements))
                 if elements:
                     return elements
             except Exception:
@@ -117,7 +233,62 @@ def _safe_find_elements(root, selectors: List[str], selector_name: str | None = 
     return []
 
 
+def _keep_outermost_elements(driver, elements):
+    """
+    Giữ lại các node ngoài cùng trong tập match.
+
+    Selector broad ở photo viewer có thể trả về nhiều wrapper/complementary lồng nhau.
+    Khi đó chỉ nên giữ ancestor ngoài cùng để tránh coi pane comment con như post container độc lập.
+    """
+    filtered = []
+
+    for element in elements:
+        try:
+            is_nested = any(
+                bool(
+                    driver.execute_script(
+                        "return arguments[0] !== arguments[1] && arguments[0].contains(arguments[1]);",
+                        existing,
+                        element,
+                    )
+                )
+                for existing in filtered
+            )
+            if is_nested:
+                continue
+
+            filtered = [
+                existing
+                for existing in filtered
+                if not bool(
+                    driver.execute_script(
+                        "return arguments[0] !== arguments[1] && arguments[0].contains(arguments[1]);",
+                        element,
+                        existing,
+                    )
+                )
+            ]
+        except Exception:
+            pass
+
+        filtered.append(element)
+
+    return filtered
+
+
 def _safe_find_first(root, selectors: List[str], selector_name: str | None = None):
+    """
+    Tìm phần tử đầu tiên một cách “an toàn” (không throw ra ngoài).
+
+    Ưu tiên:
+    1) Nếu có `selector_name`: thử lần lượt locator từ `_build_locator_chain(selector_name)`.
+       Gặp locator nào tìm thấy thì trả ngay `WebElement`.
+    2) Nếu không thấy theo locator chain: thử lần lượt các CSS selector trong `selectors`.
+
+    Kết quả:
+    - Trả về `WebElement` nếu tìm được, ngược lại `None`.
+    - Nuốt mọi exception trong quá trình find để luồng crawl không bị dừng.
+    """
     if selector_name:
         for locator in _build_locator_chain(selector_name):
             try:
@@ -132,6 +303,117 @@ def _safe_find_first(root, selectors: List[str], selector_name: str | None = Non
         except Exception:
             continue
     return None
+
+
+def _collect_texts(root, selectors: List[str], selector_name: str | None = None) -> List[str]:
+    """Collect các text (không rỗng, không trùng) từ danh sách elements tìm được."""
+    texts: List[str] = []
+    seen: Set[str] = set()
+
+    elements = _safe_find_elements(root, selectors, selector_name=selector_name)
+    for element in elements:
+        text, _ = _read_element_text(element)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        texts.append(text)
+    return texts
+
+
+def _append_comment_debug_output(source_url: str, collected_texts: List[str]) -> None:
+    try:
+        COMMENT_DEBUG_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(COMMENT_DEBUG_OUTPUT_PATH, "a", encoding="utf-8") as debug_file:
+            debug_file.write(
+                f"[{datetime.now().isoformat()}] source_url={source_url}\n"
+                f">>>>>>>>>>>>>>>>> {json.dumps(collected_texts, ensure_ascii=False)}\n"
+            )
+    except Exception as exc:
+        logger.debug("[SEL] failed writing comment debug output: %s", exc)
+
+
+def _scroll_post_for_comments(driver, post_element, source_url: str) -> None:
+    wait = WebDriverWait(driver, 2)
+    comment_selector = _post_selector("comments", source_url)
+
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'start', inline: 'nearest'});",
+            post_element,
+        )
+        wait.until(
+            lambda _driver: bool(
+                _safe_find_elements(post_element, [], selector_name=comment_selector)
+            )
+            or abs(
+                int(
+                    _driver.execute_script(
+                        "return Math.round(arguments[0].getBoundingClientRect().top || 0);",
+                        post_element,
+                    )
+                    or 0
+                )
+            )
+            < 400
+        )
+    except Exception:
+        return
+
+    last_height = -1
+    for _ in range(5):
+        try:
+            current_height = int(
+                driver.execute_script(
+                    """
+                    const rect = arguments[0].getBoundingClientRect();
+                    return Math.max(rect.height || 0, arguments[0].scrollHeight || 0);
+                    """,
+                    post_element,
+                )
+                or 0
+            )
+        except Exception:
+            current_height = 0
+
+        if current_height <= 0 or current_height == last_height:
+            break
+        last_height = current_height
+
+        try:
+            driver.execute_script(
+                """
+                const rect = arguments[0].getBoundingClientRect();
+                const targetY = window.scrollY + rect.top + Math.min(rect.height * 0.75, 1200);
+                window.scrollTo({top: targetY, behavior: 'instant'});
+                """,
+                post_element,
+            )
+        except Exception:
+            break
+
+        try:
+            wait.until(
+                lambda _driver, previous_height=last_height: bool(
+                    _safe_find_elements(post_element, [], selector_name=comment_selector)
+                )
+                or int(
+                    _driver.execute_script(
+                        """
+                        const rect = arguments[0].getBoundingClientRect();
+                        return Math.max(rect.height || 0, arguments[0].scrollHeight || 0);
+                        """,
+                        post_element,
+                    )
+                    or 0
+                )
+                != previous_height
+            )
+        except TimeoutException:
+            pass
+
+        if _safe_find_elements(post_element, [], selector_name=comment_selector):
+            break
+
 
 
 def _extract_url_digits(url: str) -> Optional[str]:
@@ -163,7 +445,260 @@ def _clean_fb_link(url: str) -> str:
         return url
 
 
-def _extract_post_link(post_element) -> str:
+def _parse_engagement_count(raw_value: Any) -> int:
+    if raw_value is None:
+        return 0
+
+    text = str(raw_value).strip()
+    if not text:
+        return 0
+
+    normalized = text.lower().replace(",", ".")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([kmb])?", normalized)
+    if not match:
+        digits = re.sub(r"\D", "", normalized)
+        return int(digits) if digits else 0
+
+    number = float(match.group(1))
+    suffix = match.group(2)
+    multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(suffix, 1)
+    return int(number * multiplier)
+
+# ===========================================================================
+#                   EXTRACT INFO BLOCKS 
+# ===========================================================================
+
+def _extract_comments(driver, post_element, source_url: str) -> List[str]:
+    comments: List[str] = []
+    seen: Set[str] = set()
+
+    _scroll_post_for_comments(driver, post_element, source_url)
+
+    comment_selector = _post_selector("comments", source_url)
+    collected_texts = _collect_texts(post_element, [], selector_name=comment_selector)
+    _append_comment_debug_output(source_url, collected_texts)
+    for raw_text in collected_texts:
+        normalized = _normalize_comment_text(raw_text)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        comments.append(normalized)
+
+    return comments
+
+
+def _normalize_comment_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return ""
+
+    lowered = cleaned.lower()
+    if lowered in {
+        "thích",
+        "trả lời",
+        "chia sẻ",
+        "phù hợp nhất",
+        "mới nhất",
+        "most relevant",
+        "newest",
+        "reply",
+        "like",
+        "share",
+    }:
+        return ""
+
+    if re.fullmatch(r"\d+", cleaned):
+        return ""
+
+    return cleaned
+
+def _closest_comment_article(driver, el):
+    try:
+        return driver.execute_script("return arguments[0].closest('[role=\"article\"]');", el)
+    except Exception:
+        return None
+
+
+def _extract_comment_ids_from_href(href: str) -> dict:
+    try:
+        parsed = urlparse(href or "")
+        params = parse_qs(parsed.query or "")
+    except Exception:
+        return {"comment_id": None, "reply_comment_id": None}
+
+    return {
+        "comment_id": (params.get("comment_id") or [None])[0],
+        "reply_comment_id": (params.get("reply_comment_id") or [None])[0],
+    }
+
+def save_article_el(article_el, filepath: str = "article_debug.html"):
+    """Lưu outerHTML của article_el ra file HTML."""
+    try:
+        html = article_el.get_attribute("outerHTML") or ""
+        with open(filepath, "w", encoding="utf-8") as f:
+            # Wrap trong html/body để browser render đúng
+            f.write(f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Article Debug</title>
+</head>
+<body>
+{html}
+</body>
+</html>""")
+        print(f"[DEBUG] Saved article_el → {filepath}")
+    except Exception as e:
+        print(f"[DEBUG] Failed to save article_el: {e}")
+
+def _extract_comment_detail_from_article(article_el) -> dict:
+    result = {
+        "nickname": None,
+        "author_url": None,
+        "comment": None,
+        "time": None,
+        "permalink": None,
+        "comment_id": None,
+        "reply_comment_id": None,
+        "react_count": 0,
+    }
+    save_article_el(article_el)
+    # permalink + ids + time text
+    try:
+        link_el = article_el.find_element(By.CSS_SELECTOR, "a[href*='comment_id=']")
+        href = (link_el.get_attribute("href") or "").strip()
+        ids = _extract_comment_ids_from_href(href)
+        result.update(ids)
+        result["permalink"] = href or None
+        result["time"] = (link_el.text or "").strip() or None
+    except Exception:
+        pass
+
+    # author
+    try:
+        author_link = article_el.find_element(By.CSS_SELECTOR, "a[role='link'][href*='/user/']")
+        result["author_url"] = (author_link.get_attribute("href") or "").strip() or None
+        name = (author_link.text or "").strip()
+        if name:
+            result["nickname"] = name
+        else:
+            try:
+                span = author_link.find_element(By.CSS_SELECTOR, "span[dir='auto']")
+                result["nickname"] = (span.text or "").strip() or None
+            except Exception:
+                pass
+    except Exception:
+        # fallback từ aria-label="Bình luận dưới tên Nom Nim ..."
+        try:
+            aria = (article_el.get_attribute("aria-label") or "").strip()
+            m = re.search(r"tên\\s+(.+?)\\s+vào\\s+", aria, flags=re.IGNORECASE)
+            if m:
+                result["nickname"] = m.group(1).strip()
+        except Exception:
+            pass
+
+    # content (giới hạn trong article)
+    try:
+        parts = article_el.find_elements(By.CSS_SELECTOR, "div[dir='auto'][style*='text-align: start']")
+        text = " ".join((p.text or "").strip() for p in parts if (p.text or "").strip()).strip()
+        result["comment"] = text or None
+    except Exception:
+        pass
+
+    # reactions
+    try:
+        react_btn = article_el.find_element(By.CSS_SELECTOR, "[role='button'][aria-label*='cảm xúc']")
+        label = (react_btn.get_attribute("aria-label") or "").strip()
+        if label:
+            result["react_count"] = _parse_engagement_count(label)
+        else:
+            result["react_count"] = _parse_engagement_count(react_btn.text or "")
+    except Exception:
+        result["react_count"] = 0
+
+    return result
+
+
+def parse_comment(driver, post_link, source_url):
+    """
+    Phase 2: mở `post_link` rồi bung/scroll để lấy comment chi tiết.
+    Trả về list[dict] (mỗi dict có nickname, comment, time, react_count, comment_id,...).
+    """
+    if not post_link:
+        return []
+
+    driver.get(post_link)
+
+    try:
+        root = driver.find_element(By.TAG_NAME, "body")
+    except Exception:
+        root = None
+
+    seen: Set[str] = set()
+    collected: List[dict] = []
+    stable_rounds = 0
+
+    for _ in range(80):
+        try:
+            if root is not None:
+                expand_post_and_comments_until_done(driver, root)
+        except Exception:
+            pass
+
+        new_this_round = 0
+        try:
+            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href*='comment_id=']")
+        except Exception:
+            anchors = []
+
+        for a in anchors:
+            try:
+                href = (a.get_attribute("href") or "").strip()
+                ids = _extract_comment_ids_from_href(href)
+                comment_id = ids.get("comment_id")
+                reply_comment_id = ids.get("reply_comment_id")
+                key = str(reply_comment_id or comment_id or "").strip()
+                if not key or key in seen:
+                    continue
+
+                article = _closest_comment_article(driver, a)
+                if article is None:
+                    continue
+
+                detail = _extract_comment_detail_from_article(article)
+                if not detail.get("comment_id") and comment_id:
+                    detail["comment_id"] = comment_id
+                if not detail.get("reply_comment_id") and reply_comment_id:
+                    detail["reply_comment_id"] = reply_comment_id
+                if not detail.get("permalink") and href:
+                    detail["permalink"] = href
+
+                seen.add(key)
+                collected.append(detail)
+                new_this_round += 1
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+
+        if new_this_round == 0:
+            stable_rounds += 1
+        else:
+            stable_rounds = 0
+
+        if stable_rounds >= 4:
+            break
+
+        try:
+            driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight * 0.9));")
+        except Exception:
+            break
+        time.sleep(0.75)
+
+    return collected
+
+
+def _extract_post_link(post_element, source_url: str) -> str:
     candidates = _safe_find_elements(
         post_element,
         [
@@ -173,7 +708,7 @@ def _extract_post_link(post_element) -> str:
             "a[href*='/reel/']",
             "a[role='link'][href*='facebook.com']",
         ],
-        selector_name="profile.posts.link",
+        selector_name=_post_selector("link", source_url),
     )
     for element in candidates:
         try:
@@ -185,96 +720,140 @@ def _extract_post_link(post_element) -> str:
             continue
     return ""
 
-def get_post_timestamp_and_id(post_element) -> dict:
-    """
-    Extract timestamp link và post ID từ DOM Facebook.
-    
-    Selector hoạt động: thẻ <a> có href chứa '/posts/pfbid'
-    """
+
+def _extract_comment(post_element, source_url: str) -> int:
+    raw_text = _safe_text(
+        post_element,
+        [
+            "span.xkrqix3.x1sur9pj",
+            "div[aria-label*='bình luận' i]",
+            "div[aria-label*='comment' i]",
+        ],
+        selector_name=_post_selector("comment", source_url),
+    )
+    return _parse_engagement_count(raw_text)
+
+
+def _extract_share(post_element, source_url: str) -> int:
+    raw_text = _safe_text(
+        post_element,
+        [
+            "span.xkrqix3.x1sur9pj",
+            "div[aria-label*='chia sẻ' i]",
+            "div[aria-label*='share' i]",
+        ],
+        selector_name=_post_selector("share", source_url),
+    )
+    return _parse_engagement_count(raw_text)
+
+
+def _extract_engagement_counts(post_element, source_url: str) -> tuple[Dict[str, int], Dict[str, int]]:
+    engagement_counts = {
+        "comment": _extract_comment(post_element, source_url),
+        "share": _extract_share(post_element, source_url),
+    }
+    reaction_breakdown = {
+        "like": 0,
+        "love": 0,
+        "haha": 0,
+        "wow": 0,
+        "sad": 0,
+        "angry": 0,
+        "care": 0,
+    }
+    return engagement_counts, reaction_breakdown
+
+def get_post_timestamp_and_id(driver, post_element, source_url: str) -> dict:
     result = {
         "timestamp_text": "",
         "timestamp_url": "",
-        "post_id": "",        # pfbid dạng encode
-        "post_id_raw": "",    # username/posts/pfbid...
+        "post_id": "",
+        "post_id_raw": "",
     }
 
     try:
-        # Selector chính xác từ DOM: <a> có href chứa /posts/
-        timestamp_link = _safe_find_first(
-            post_element,
-            ["a[href*='/posts/pfbid']"],
-            selector_name="profile.posts.timestamp",
-        )
-        if timestamp_link is None:
-            raise ValueError("timestamp link not found")
+        actions = ActionChains(driver)
+        links = post_element.find_elements(By.CSS_SELECTOR, "[role='link']")
 
-        href = (timestamp_link.get_attribute("href") or "").strip()
-        clean_url = href.split("?", 1)[0]
-        result["timestamp_url"] = clean_url
+        for el in links:
+            try:
+                actions.move_to_element(el).perform()
+                time.sleep(0.3)
 
-        # Post ID = phần sau /posts/
-        # vd: .../charlotte.rosabella/posts/pfbid02dZjXQ7sc...
-        if "/posts/" in clean_url:
-            result["post_id"] = clean_url.split("/posts/", 1)[1]
-            result["post_id_raw"] = clean_url
+                href = el.get_attribute("href")
+                if not href:
+                    continue
 
-        # Text hiển thị (vd: "1 giờ", "Hôm qua lúc 10:00")
-        result["timestamp_text"] = (timestamp_link.text or "").strip()
-    except Exception:
-        pass
+                if "facebook.com/groups" in href and "/posts/" in href:
+                    result["timestamp_url"] = href
+
+                    # ✅ Ưu tiên lấy từ aria-label hoặc title (không bị nhiễu)
+                    timestamp_text = (
+                        el.get_attribute("aria-label")
+                        or el.get_attribute("title")
+                        or ""
+                    )
+
+                    # ✅ Fallback: lấy text từ element con <abbr> hoặc <span>
+                    if not timestamp_text:
+                        try:
+                            abbr = el.find_element(By.TAG_NAME, "abbr")
+                            timestamp_text = abbr.get_attribute("title") or abbr.text
+                        except Exception:
+                            pass
+
+                    # ✅ Fallback cuối: dùng tooltip sau khi hover
+                    if not timestamp_text:
+                        try:
+                            tooltip = driver.find_element(
+                                By.CSS_SELECTOR, "[role='tooltip']"
+                            )
+                            timestamp_text = tooltip.text
+                        except Exception:
+                            pass
+
+                    result["timestamp_text"] = timestamp_text.strip()
+
+                    # Extract post_id
+                    parts = href.split("/")
+                    if "posts" in parts:
+                        idx = parts.index("posts")
+                        if idx + 1 < len(parts):
+                            post_id = parts[idx + 1].split("?")[0]
+                            result["post_id"] = post_id
+                            result["post_id_raw"] = post_id
+
+                    break
+
+            except Exception:
+                continue
+
+    except Exception as e:
+        print(f"Error extracting timestamp: {e}")
 
     return result
 
-
-def _extract_timestamp_post_id_and_link(post_element) -> tuple[str, str]:
-    timestamp_data = get_post_timestamp_and_id(post_element)
-    return (
-        (timestamp_data.get("post_id") or "").strip(),
-        (timestamp_data.get("timestamp_url") or "").strip(),
-    )
+import re
+from urllib.parse import urlparse, parse_qs
 
 
-def _extract_photo_post_id_and_link(post_element) -> tuple[str, str]:
-    clean_href = ""
-    photo_link = _safe_find_first(
-        post_element,
-        [
-            "a[href*='fbid=']",
-            "a[href*='/photo/']",
-        ],
-        selector_name="profile.posts.photo_link",
-    )
-    if photo_link is not None:
-        try:
-            photo_href = (photo_link.get_attribute("href") or "").strip()
-        except Exception:
-            photo_href = ""
+def get_author_id(url: str):
+    if not url:
+        return None
 
-        if photo_href:
-            try:
-                parsed = urlparse(photo_href)
-                photo_qs = parse_qs(parsed.query or "")
-            except Exception:
-                parsed = None
-                photo_qs = {}
+    try:
+        parsed = urlparse(url)
 
-            if parsed is not None:
-                clean_href = f"{parsed.scheme or 'https'}://{parsed.netloc}{parsed.path}".rstrip("/")
-            else:
-                clean_href = photo_href.split("?", 1)[0]
+        m = re.search(r"/user/(\d+)", parsed.path or "")
+        if m:
+            return m.group(1)
 
-            photo_fbid = photo_qs.get("fbid", [None])[0]
-            if isinstance(photo_fbid, str) and photo_fbid.strip():
-                return photo_fbid.strip(), clean_href
+        qs = parse_qs(parsed.query)
+        return qs.get("id", [None])[0]
+    except Exception:
+        return None
 
-            photo_digits = _extract_url_digits(clean_href)
-            if isinstance(photo_digits, str) and photo_digits.strip():
-                return photo_digits.strip(), clean_href
-
-    return "", clean_href
-
-
-def _extract_author(post_element) -> Dict[str, str]:
+def _extract_author(post_element, source_url: str) -> Dict[str, str]:
     author_name = _safe_text(
         post_element,
         [
@@ -283,30 +862,29 @@ def _extract_author(post_element) -> Dict[str, str]:
             "strong span[dir='auto']",
             "a[role='link'] h3 span[dir='auto']",
         ],
-        selector_name="profile.posts.author_name",
+        selector_name=_post_selector("author_name", source_url),
     )
     author_url = _safe_attr(
         post_element,
         [
-            "h2 a[href*='facebook.com']",
-            "a[role='link'][href*='facebook.com'][aria-label]",
-            "strong a[href*='facebook.com']",
+            "h2 a[href*='/user/']",
+            "a[aria-label][href*='facebook.com/profile.php']",
         ],
         "href",
-        selector_name="profile.posts.author_url",
+        selector_name=_post_selector("author_url", source_url),
     )
-    author_url = _clean_fb_link(author_url)
-
+    # author_url = _clean_fb_link(author_url)
+    author_id = get_author_id(author_url)
+    
     avatar = ""
     avatar_el = _safe_find_first(
         post_element,
         [
+            ".xjp7ctv > [type='nested/pressable'] > .x1i10hfl",
+            "object > a:nth-child(1)",
             "a[aria-label] image",
-            "svg[role='img'] image",
-            "image",
-            "img[referrerpolicy]",
         ],
-        selector_name="profile.posts.author_avatar",
+        selector_name=_post_selector("author_avatar", source_url),
     )
     if avatar_el is not None:
         for attr in ("xlink:href", "href", "src"):
@@ -317,36 +895,114 @@ def _extract_author(post_element) -> Dict[str, str]:
             if avatar:
                 break
 
-    return {"name": author_name, "url": author_url, "avatar": avatar}
+    return {"name": author_name, "url": author_url, "avatar": avatar, "id":author_id}
 
 
-def _extract_content(post_element) -> str:
-    content = _safe_text(
+def _find_post_content_roots(post_element, source_url: str):
+    selectors = [
+        "[data-ad-comet-preview='message']",
+        "div[data-ad-preview='message']",
+        "ol[class*='html-ol']",
+        "div[dir='auto'][style*='text-align']",
+    ]
+
+    roots = _safe_find_elements(post_element, selectors)
+    if roots:
+        return roots
+
+    return [post_element]
+
+
+def _expand_post_content(driver, post_element, source_url: str) -> None:
+    wait = WebDriverWait(driver, 2)
+    max_iterations = 3
+
+    for _ in range(max_iterations):
+        try:
+            clicked_any = False
+            for root in _find_post_content_roots(post_element, source_url):
+                try:
+                    xem_them_buttons = root.find_elements(
+                        By.XPATH,
+                        "//div[normalize-space(text())='Xem thêm']",
+                    )
+                except Exception:
+                    continue
+
+                for button in xem_them_buttons:
+                    try:
+                        if not button.is_displayed():
+                            continue
+
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                            button,
+                        )
+                        wait.until(lambda _driver: button.is_displayed() and button.is_enabled())
+                        driver.execute_script("arguments[0].click();", button)
+                        clicked_any = True
+
+                        try:
+                            wait.until(
+                                lambda _driver: not button.is_displayed() or EC.staleness_of(button)(_driver)
+                            )
+                        except TimeoutException:
+                            pass
+                    except StaleElementReferenceException:
+                        continue
+                    except TimeoutException:
+                        continue
+                    except Exception:
+                        continue
+
+            if not clicked_any:
+                break
+        except Exception:
+            break
+
+
+def _extract_content(driver, post_element, source_url: str) -> str:
+    _expand_post_content(driver, post_element, source_url)
+
+    content_texts = _collect_texts(
         post_element,
         [
-            "[data-ad-comet-preview='message'] [dir='auto']",
-            "div[data-ad-preview='message'] [dir='auto']",
-            "div[dir='auto'][style*='text-align']",
+            "ol[class*='html-ol'] li div span",
         ],
-        selector_name="profile.posts.content",
+        selector_name=_post_selector("content", source_url),
     )
-    return re.sub(r"\n{3,}", "\n\n", content).strip()
+    content = "\n".join(content_texts).strip()
+    if content.strip():
+        return re.sub(r"\n{3,}", "\n\n", content).strip()
+    try:
+        content_elements = WebDriverWait(post_element, 3).until(
+            lambda root: root.find_elements(By.CSS_SELECTOR, ".xyinxu5 > .x193iq5w")
+        )
+        content = "\n".join(el.text for el in content_elements if el.text.strip())
+        return re.sub(r"\n{3,}", "\n\n", content).strip()
+    except TimeoutException:
+        return ""
 
 
-def _extract_images(post_element) -> List[str]:
+def _extract_images(post_element, source_url: str) -> List[str]:
     images: List[str] = []
     for img in _safe_find_elements(
         post_element,
         [
-            "a[href*='photo'] img",
-            "img[data-imgperflogname='feedCoverPhoto']",
+            "[data-visualcompletion='media-vc-image']",
             "img[data-visualcompletion='media-vc-image']",
-            "img[alt='']",
+            "img[data-imgperflogname='feedCoverPhoto']",
+            "img[referrerpolicy]",
         ],
-        selector_name="profile.posts.image",
+        selector_name=_post_selector("image", source_url),
     ):
         try:
-            src = img.get_attribute("src") or ""
+            src = (
+                img.get_attribute("src")
+                or img.get_attribute("currentSrc")
+                or img.get_attribute("data-src")
+                or ""
+            )
         except Exception:
             continue
         if not src or "fbcdn" not in src:
@@ -356,9 +1012,9 @@ def _extract_images(post_element) -> List[str]:
     return images
 
 
-def _extract_videos(post_element) -> List[str]:
+def _extract_videos(post_element, source_url: str) -> List[str]:
     videos: List[str] = []
-    for video in _safe_find_elements(post_element, ["video"], selector_name="profile.posts.video"):
+    for video in _safe_find_elements(post_element, ["video"], selector_name=_post_selector("video", source_url)):
         try:
             src = video.get_attribute("src") or video.get_attribute("poster") or ""
         except Exception:
@@ -368,62 +1024,17 @@ def _extract_videos(post_element) -> List[str]:
     return videos
 
 
-def _extract_timestamp_text(post_element) -> str:
-    return _safe_text(
-        post_element,
-        [
-            "a[href*='/posts/'] span",
-            "a[href*='/permalink/'] span",
-            "a[href*='story_fbid='] span",
-            "abbr",
-            "span[id*='timestamp']",
-        ],
-        selector_name="profile.posts.timestamp_text",
-    )
-
-
-def _extract_visibility(post_element) -> str:
+def _extract_visibility(post_element, source_url: str) -> str:
     return _safe_text(
         post_element,
         [
             "span.xzpqnlu.x179tack",
             "div[aria-label*='Công khai'] span",
             "div[aria-label*='Public'] span",
+            ".xs7f9wi"
         ],
-        selector_name="profile.posts.visibility",
+        selector_name=_post_selector("visibility", source_url),
     )
-
-
-def _extract_link_preview(post_element) -> Dict[str, str]:
-    result = {"domain": "", "title": "", "url": ""}
-    result["domain"] = _safe_text(
-        post_element,
-        [
-            "[data-ad-rendering-role='meta'] span",
-            "a[rel='nofollow noreferrer'] span[dir='auto']",
-        ],
-        selector_name="profile.posts.link_preview.domain",
-    )
-    result["title"] = _safe_text(
-        post_element,
-        [
-            "[data-ad-rendering-role='title'] span",
-            "a[rel='nofollow noreferrer'] h3 span",
-            "a[rel='nofollow noreferrer'] span[dir='auto']",
-        ],
-        selector_name="profile.posts.link_preview.title",
-    )
-    result["url"] = _safe_attr(
-        post_element,
-        [
-            "a[rel='nofollow noreferrer']",
-            "a[target='_blank'][href^='http']",
-        ],
-        "href",
-        selector_name="profile.posts.link_preview.url",
-    )
-    return result
-
 
 def _extract_source_id(group_url: str) -> Optional[str]:
     try:
@@ -451,105 +1062,59 @@ def _build_post_identity(item: Dict[str, Any]) -> Optional[str]:
         return f"{author}|{content[:80]}"
     return None
 
-
-def extract_selector_post(post_element, group_url: str) -> Optional[Dict[str, Any]]:
-    author = _extract_author(post_element)
-    content = _extract_content(post_element)
-    timestamp_post_id, timestamp_link = _extract_timestamp_post_id_and_link(post_element)
-    photo_fid, photo_link = _extract_photo_post_id_and_link(post_element)
-    link = timestamp_link or _extract_post_link(post_element) or photo_link
-    link_preview = _extract_link_preview(post_element)
-    image_urls = _extract_images(post_element)
-    video_urls = _extract_videos(post_element)
-    timestamp_text = _extract_timestamp_text(post_element)
-    visibility = _extract_visibility(post_element)
-
-    rid = timestamp_post_id or photo_fid or _extract_url_digits(link) or ""
-    fb_id = rid
+# ===========================================================================
+#                   EXTRACT POST PINELINE
+# ===========================================================================
+def _extract_selector_post_context(driver, post_element, group_url: str) -> Dict[str, Any]:
+    
+    author = _extract_author(post_element, group_url)
+    visibility = _extract_visibility(post_element, group_url)
+    engagement_counts, reaction_breakdown = _extract_engagement_counts(post_element, group_url)
+    content = _extract_content(driver, post_element, group_url)
+    timestamp_info = get_post_timestamp_and_id(driver, post_element, group_url)
+    # Phase 1: chỉ thu metadata + post link. Comment chi tiết sẽ cào ở phase 2
+    # để tránh driver.get(post_link) làm stale DOM khi đang duyệt nhiều post.
+    comments: list[dict] = []
+    
     item = {
-        "id": fb_id,
-        "rid": rid,
+        "id": timestamp_info["post_id"],
+        "rid": timestamp_info["post_id_raw"],
         "type": "story",
-        "link": link,
-        "author_id": None,
-        "author": author["name"],
-        "author_link": author["url"],
-        "avatar": author["avatar"],
-        "created_time": None,
-        "timestamp_text": timestamp_text,
+        "link": timestamp_info["timestamp_url"],
+        "author_id": author.get("id", ""),
+        "author": author.get("name", ""),
+        "author_link": author.get("url", ""),
+        "avatar": author.get("avatar", ""),
+        "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp_text": timestamp_info["timestamp_text"],
         "content": content,
-        "image_url": image_urls,
-        "like": 0,
-        "comment": 0,
-        "haha": 0,
-        "wow": 0,
-        "sad": 0,
-        "love": 0,
-        "angry": 0,
-        "care": 0,
-        "share": 0,
+        "comments": comments,
+        "comments_crawled": False,
+        "comment": engagement_counts["comment"],
+        "share": engagement_counts["share"],
+        "reactions": reaction_breakdown,
         "hashtag": re.findall(r"#\w+", content or ""),
-        "video": video_urls,
         "source_id": _extract_source_id(group_url),
-        "is_share": bool(link_preview["url"]),
-        "link_share": link_preview["url"] or None,
-        "type_share": "link" if link_preview["url"] else None,
-        "origin_id": None,
-        "out_links": [link_preview["url"]] if link_preview["url"] else [],
-        "out_domains": [link_preview["domain"]] if link_preview["domain"] else [],
         "visibility": visibility,
-        "link_title": link_preview["title"],
-        "link_url": link_preview["url"],
-        "link_domain": link_preview["domain"],
     }
-
     identity = _build_post_identity(item)
     if not identity:
-        return None
+        return {
+            "item": None,
+        }
 
     if not item["id"]:
         item["id"] = identity
     if not item["rid"]:
         item["rid"] = identity
 
-    return item
+    return {
+        "item": item,
+    }
 
-
-def collect_visible_selector_posts(driver):
-    seen = []
-    unique_ids = set()
-    elements = _safe_find_elements(driver, list(POST_CONTAINER_SELECTORS), selector_name="profile.posts.container")
-    for element in elements:
-        try:
-            marker = element.id
-        except Exception:
-            marker = None
-        if marker and marker in unique_ids:
-            continue
-        if marker:
-            unique_ids.add(marker)
-        seen.append(element)
-
-    if seen:
-        return seen
-
-    for selector in POST_CONTAINER_SELECTORS:
-        try:
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-        except Exception:
-            continue
-        for element in elements:
-            try:
-                marker = element.id
-            except Exception:
-                marker = None
-            if marker and marker in unique_ids:
-                continue
-            if marker:
-                unique_ids.add(marker)
-            seen.append(element)
-    return seen
-
+def extract_selector_post(driver, post_element, group_url: str) -> Optional[Dict[str, Any]]:
+    context = _extract_selector_post_context(driver, post_element, group_url)
+    return context["item"]
 
 def process_visible_selector_posts(
     driver,
@@ -562,9 +1127,9 @@ def process_visible_selector_posts(
     fresh: List[Dict[str, Any]] = []
     written_this_round: Set[str] = set()
 
-    for idx, post_element in enumerate(collect_visible_selector_posts(driver)):
+    for idx, post_element in enumerate(collect_visible_selector_posts(driver, group_url)):
         try:
-            item = extract_selector_post(post_element, group_url)
+            item = extract_selector_post(driver, post_element, group_url)
         except StaleElementReferenceException:
             logger.debug("[SEL%s] stale post element at index=%d", log_prefix, idx)
             continue
@@ -589,3 +1154,315 @@ def process_visible_selector_posts(
     seen_ids.update(written_this_round)
     logger.info("[SEL%s] wrote %d fresh posts", log_prefix, len(fresh))
     return len(fresh)
+
+def collect_visible_selector_posts(driver, source_url: str):
+    seen = []
+    unique_ids = set()
+
+    # Case 1: dialog trong feed
+    elements = driver.find_elements(
+        By.CSS_SELECTOR,
+        "div[role='dialog'][aria-label='Trình xem ảnh'] div[role='complementary']"
+    )
+
+    # Case 2: navigate thẳng driver.get → photo URL
+    if not elements:
+        elements = driver.find_elements(
+            By.CSS_SELECTOR,
+            "div[role='complementary']"
+        )
+
+    # Case 3: fallback
+    if not elements:
+        elements = driver.find_elements(
+            By.CSS_SELECTOR,
+            "[data-name='media-viewer-nav-container']"
+        )
+
+    elements = _keep_outermost_elements(driver, elements)
+
+    for element in elements:
+        try:
+            marker = element.id
+        except Exception:
+            marker = None
+        if marker and marker in unique_ids:
+            continue
+        if marker:
+            unique_ids.add(marker)
+        seen.append(element)
+
+    return seen
+
+import json
+from datetime import datetime
+
+def _dump_post_debug(driver, post_element, context, idx: int):
+    try:
+        data = {
+        "index": idx,
+        "tag": post_element.tag_name,
+        "text": post_element.text[:500],
+        "html": post_element.get_attribute("outerHTML"),
+        "context": context,  # cái này đã là dict → dump OK
+        "url": driver.current_url,
+        "timestamp": datetime.utcnow().isoformat()
+        }
+
+        filename = f"debug_post_{idx}.json"
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        logger.info(f"Dump failed: {e}")
+
+def extract_best_selector_post(
+    driver,
+    group_url: str,
+    preferred_photo_id: str | None = None,
+    *,
+    require_preferred_match: bool = False,
+) -> Optional[Dict[str, Any]]:
+    fallback_item: Optional[Dict[str, Any]] = None
+
+    # elements = collect_visible_selector_posts(driver, group_url)
+    posts = collect_visible_selector_posts(driver, group_url)
+
+    for post in posts:
+        expand_post_and_comments_until_done(driver, post)
+
+    logger.info(f"[DEBUG] elements count: {len(posts)}")
+
+    for idx, post_element in enumerate(posts):
+        try:
+            context = _extract_selector_post_context(driver, post_element, group_url)
+        except StaleElementReferenceException:
+            continue
+        except Exception as exc:
+            logger.debug("[SEL] _extract_selector_post_context failed: %s", exc)
+            continue
+
+        # Debug xem extract được gì
+        logger.info(f"[DEBUG] idx={idx}")
+        logger.info(f"[DEBUG] author={context.get('item', {}) and context['item'].get('author')}")
+        logger.info(f"[DEBUG] content snippet={context.get('item', {}) and str(context['item'].get('comments', ''))[:100]}")
+        logger.info(f"[DEBUG] photo_fbid={context.get('photo_fbid')}")
+        logger.info(f"[DEBUG] link={context.get('link')}")
+        logger.info(f"[DEBUG] item is None: {context.get('item') is None}")
+
+        _dump_post_debug(driver, post_element, context, idx)
+        item = context.get("item")
+        logger.info("item`: ", item)
+        if not item:
+            continue
+        
+        photo_fbid = (context.get("photo_fbid") or "").strip()
+        if preferred_photo_id and photo_fbid == preferred_photo_id:
+            return item
+
+        if fallback_item is None:
+            fallback_item = item
+
+    if preferred_photo_id and require_preferred_match:
+        return None
+
+    return fallback_item
+
+# ===============================================
+
+import time
+from typing import List, Optional, Set
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.webdriver import WebDriver, WebElement
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+    JavascriptException,
+)
+
+EXPAND_PATTERNS = [
+    "xem thêm",
+    "xem thêm bình luận",
+    "xem thêm câu trả lời",
+    "xem thêm phản hồi",
+    "xem tất cả phản hồi",
+    "xem tất cả",
+    "phản hồi trước",
+    "bình luận trước",
+]
+
+SKIP_PATTERNS = [
+    "ẩn bớt",
+    "thích",
+    "chia sẻ",
+    "gửi",
+    "viết bình luận",
+    "bày tỏ cảm xúc",
+    "tất cả cảm xúc",
+    "hành động với bài viết này",
+]
+
+
+def _normalize_text(text: Optional[str]) -> str:
+    return " ".join((text or "").split()).strip().lower()
+
+
+def _is_expand_text(text: str) -> bool:
+    t = _normalize_text(text)
+    if not t:
+        return False
+
+    if any(skip in t for skip in SKIP_PATTERNS):
+        return False
+
+    # match rộng để bắt cả "Xem tất cả 2 phản hồi"
+    if any(pat in t for pat in EXPAND_PATTERNS):
+        return True
+
+    # fallback cho các dạng có số chen giữa
+    if "xem" in t and (
+        "bình luận" in t or
+        "phản hồi" in t or
+        "trả lời" in t or
+        "thêm" in t
+    ):
+        return True
+
+    return False
+
+
+def _element_visible_enabled(el: WebElement) -> bool:
+    try:
+        return el.is_displayed() and el.is_enabled()
+    except Exception:
+        return False
+
+
+def _safe_click(driver: WebDriver, el: WebElement) -> bool:
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center', inline:'center'});", el
+        )
+        time.sleep(0.15)
+    except Exception:
+        pass
+
+    # click thường
+    try:
+        el.click()
+        return True
+    except (StaleElementReferenceException,
+            ElementClickInterceptedException,
+            ElementNotInteractableException):
+        pass
+    except Exception:
+        pass
+
+    # click JS fallback
+    try:
+        driver.execute_script("arguments[0].click();", el)
+        return True
+    except (StaleElementReferenceException, JavascriptException):
+        return False
+    except Exception:
+        return False
+
+
+def _find_expand_buttons(root: WebElement) -> List[WebElement]:
+    """
+    Tìm các button/div/span/a có text kiểu 'Xem thêm', 'Xem tất cả 2 phản hồi',...
+    Dùng XPath tương đối để chỉ quét trong root.
+    """
+    xpath = """
+    .//*[self::div or self::span or self::a]
+      [
+        @role='button'
+        or @role='link'
+        or self::a
+      ]
+    """
+    candidates = root.find_elements(By.XPATH, xpath)
+
+    results = []
+    seen = set()
+
+    for el in candidates:
+        try:
+            text = _normalize_text(el.text)
+            aria = _normalize_text(el.get_attribute("aria-label"))
+            title = _normalize_text(el.get_attribute("title"))
+            merged = " | ".join(x for x in [text, aria, title] if x)
+
+            if not _is_expand_text(merged):
+                continue
+
+            if not _element_visible_enabled(el):
+                continue
+
+            key = (
+                merged,
+                el.get_attribute("outerHTML")[:300]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(el)
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+
+    return results
+
+
+def expand_post_and_comments_until_done(
+    driver: WebDriver,
+    root: WebElement,
+    pause_after_click: float = 0.35,
+    max_rounds: int = 50,
+) -> int:
+    total_clicked = 0
+    clicked_fingerprints: Set[str] = set()
+
+    for _ in range(max_rounds):
+        try:
+            buttons = _find_expand_buttons(root)
+        except StaleElementReferenceException:
+            break
+        except Exception:
+            break
+
+        if not buttons:
+            break
+
+        clicked_this_round = 0
+
+        for btn in buttons:
+            try:
+                label = (
+                    _normalize_text(btn.text)
+                    or _normalize_text(btn.get_attribute("aria-label"))
+                    or _normalize_text(btn.get_attribute("title"))
+                )
+
+                fp = f"{label}|{btn.get_attribute('outerHTML')[:200]}"
+                if fp in clicked_fingerprints:
+                    continue
+
+                if _safe_click(driver, btn):
+                    clicked_fingerprints.add(fp)
+                    clicked_this_round += 1
+                    total_clicked += 1
+                    time.sleep(pause_after_click)
+
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+
+        if clicked_this_round == 0:
+            break
+
+    return total_clicked
