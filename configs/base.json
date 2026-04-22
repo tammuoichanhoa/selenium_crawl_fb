@@ -15,7 +15,7 @@
     "user_agent_rotation": true,
     "proxy_rotation": false,
     "scroll_until_stable": {
-      "max_scrolls": 80,
+      "max_scrolls": 5,
       "stable_rounds": 4,
       "scroll_pause_seconds": 2.0,
       "settle_pause_seconds": 0.5

@@ -408,10 +408,15 @@
     "profile.posts.author_name": {
       "primary": {
         "type": "css",
-        "value": "h2 a[role='link'] span[dir='auto']",
+        "value": "h2 a[href*='/groups/'][href*='/user/']",
         "priority": 6
       },
       "fallbacks": [
+        {
+          "type": "css",
+          "value": "h2 a[role='link']",
+          "priority": 5
+        },
         {
           "type": "css",
           "value": "h2 a b span",
@@ -491,6 +496,11 @@
           "type": "css",
           "value": "div[dir='auto'][style*='text-align']",
           "priority": 4
+        },
+        {
+          "type": "class",
+          "value": ".xyinxu5 > .x193iq5w",
+          "priority": 4
         }
       ],
       "attribute": "text"
@@ -563,10 +573,15 @@
     "profile.posts.visibility": {
       "primary": {
         "type": "css",
-        "value": "span.xzpqnlu.x179tack",
+        "value": "svg[title]",
         "priority": 6
       },
       "fallbacks": [
+        {
+          "type": "css",
+          "value": "[title='Đã chia sẻ với Công khai']",
+          "priority": 4
+        },
         {
           "type": "css",
           "value": "div[aria-label*='Công khai'] span",

@@ -4,9 +4,9 @@ from ..config import PROJECT_ROOT
 
 
 def compute_paths(data_root: Path, page_name: str, account_tag: str):
-    base = data_root / "profile" / "page" / page_name
-    if account_tag:
-        base = base / f"ACC_{account_tag}"
+    base = data_root / account_tag / page_name
+    # if account_tag:
+    #     base = base / f"ACC_{account_tag}"
 
     out_ndjson = base / "posts_all.ndjson"
     raw_dump_dir = base / "raw_dump_posts"
