@@ -531,6 +531,197 @@ def _extract_comment_ids_from_href(href: str) -> dict:
         "reply_comment_id": (params.get("reply_comment_id") or [None])[0],
     }
 
+def _extract_post_id_from_link(link: str) -> str | None:
+    """
+    Cố gắng lấy post_id từ URL của FB để filter comment_id anchors, tránh lẫn element
+    từ page phía sau (feed vẫn tồn tại trong DOM khi mở post dạng overlay/dialog).
+    """
+    try:
+        parsed = urlparse(link or "")
+    except Exception:
+        return None
+
+    path = parsed.path or ""
+    m = re.search(r"/posts/(\d+)", path)
+    if m:
+        return m.group(1)
+    m = re.search(r"/permalink/(\d+)", path)
+    if m:
+        return m.group(1)
+
+    try:
+        params = parse_qs(parsed.query or "")
+    except Exception:
+        params = {}
+
+    for key in ("story_fbid", "fbid", "post_id"):
+        value = (params.get(key) or [None])[0]
+        if value:
+            return str(value)
+
+    return None
+
+
+def _find_comment_context_root(driver):
+    """
+    Facebook thường mở post/comment trong overlay (role=dialog), còn feed phía sau vẫn
+    nằm trong DOM. Nếu find_elements từ driver/body sẽ dễ lẫn anchors/comment_id
+    từ background. Hàm này cố gắng trả về container "đúng" để scope query.
+    """
+    try:
+        dialogs = driver.find_elements(By.CSS_SELECTOR, "div[role='dialog']")
+    except Exception:
+        dialogs = []
+
+    # ưu tiên dialog "trên cùng" và có chứa comment_id anchors
+    for dialog in reversed(dialogs):
+        try:
+            if not dialog.is_displayed():
+                continue
+            if dialog.find_elements(By.CSS_SELECTOR, "a[href*='comment_id=']"):
+                return dialog
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+
+    for selector in ("div[role='main']", "body"):
+        try:
+            return driver.find_element(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+    return None
+
+
+def _scroll_comment_context(driver, root) -> None:
+    """
+    Scroll đúng context để load thêm comment:
+    - Ưu tiên scroll vào "khung post" (scrollable container) bên trong dialog/main
+      vì Facebook thường dùng nested scroll container khi mở post theo overlay.
+    - Fallback: scroll root nếu scroll được; cuối cùng mới scroll window.
+    """
+    target = _find_comment_scroll_target(driver, root)
+
+    try:
+        if target is not None:
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const delta = Math.floor((el && el.clientHeight ? el.clientHeight : window.innerHeight) * 0.9);
+                if (el) el.scrollTop = el.scrollTop + delta;
+                """,
+                target,
+            )
+            return
+    except Exception:
+        pass
+
+    try:
+        if root is not None:
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const delta = Math.floor((el && el.clientHeight ? el.clientHeight : window.innerHeight) * 0.9);
+                el.scrollTop = el.scrollTop + delta;
+                """,
+                root,
+            )
+            return
+    except Exception:
+        pass
+
+    try:
+        driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight * 0.9));")
+    except Exception:
+        pass
+
+def _find_comment_scroll_target(driver, root):
+    """
+    Best-effort tìm scrollable container để Facebook load thêm comment.
+    Tách riêng để reuse cho windowed expand + prune.
+    """
+    if root is None:
+        return None
+
+    try:
+        return driver.execute_script(
+            """
+            const root = arguments[0];
+            if (!root) return null;
+
+            const isVisible = (el) => {
+              if (!el) return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+
+            const overflowOk = (el) => {
+              const st = window.getComputedStyle(el);
+              if (!st) return false;
+              const oy = (st.overflowY || '').toLowerCase();
+              return oy === 'auto' || oy === 'scroll';
+            };
+
+            const isScrollable = (el) => {
+              try {
+                return (el.scrollHeight - el.clientHeight) > 80;
+              } catch (e) {
+                return false;
+              }
+            };
+
+            const candidates = [];
+            for (const sel of ['[role=\"dialog\"]', '[role=\"main\"]', 'div', 'section', 'ul']) {
+              try {
+                root.querySelectorAll(sel).forEach(el => candidates.push(el));
+              } catch (e) {}
+            }
+
+            let best = null;
+            let bestScore = -1;
+
+            for (const el of candidates) {
+              if (!isVisible(el)) continue;
+              if (!overflowOk(el)) continue;
+              if (!isScrollable(el)) continue;
+
+              let commentAnchors = 0;
+              try {
+                commentAnchors = el.querySelectorAll("a[href*='comment_id=']").length;
+              } catch (e) {
+                commentAnchors = 0;
+              }
+
+              const scrollRoom = Math.max(0, (el.scrollHeight - el.clientHeight));
+              const score = (commentAnchors * 100000) + Math.min(scrollRoom, 200000);
+              if (score > bestScore) {
+                best = el;
+                bestScore = score;
+              }
+            }
+
+            if (!best) {
+              const divs = [];
+              try { root.querySelectorAll('div,section,ul').forEach(el => divs.push(el)); } catch (e) {}
+              for (const el of divs) {
+                if (!isVisible(el)) continue;
+                if (!overflowOk(el)) continue;
+                if (!isScrollable(el)) continue;
+                const scrollRoom = Math.max(0, (el.scrollHeight - el.clientHeight));
+                if (scrollRoom > bestScore) {
+                  best = el;
+                  bestScore = scrollRoom;
+                }
+              }
+            }
+
+            return best;
+            """,
+            root,
+        )
+    except Exception:
+        return None
+
 def save_article_el(article_el, filepath: str = "article_debug.html"):
     """Lưu outerHTML của article_el ra file HTML."""
     try:
@@ -562,61 +753,162 @@ def _extract_comment_detail_from_article(article_el) -> dict:
         "reply_comment_id": None,
         "react_count": 0,
     }
-    save_article_el(article_el)
-    # permalink + ids + time text
+
+    try:
+        save_article_el(article_el)
+    except Exception:
+        pass
+
+    # =========================
+    # permalink + ids + time
+    # =========================
     try:
         link_el = article_el.find_element(By.CSS_SELECTOR, "a[href*='comment_id=']")
         href = (link_el.get_attribute("href") or "").strip()
+
         ids = _extract_comment_ids_from_href(href)
         result.update(ids)
+
         result["permalink"] = href or None
         result["time"] = (link_el.text or "").strip() or None
     except Exception:
         pass
 
-    # author
+    # =========================
+    # author (FIX CHUẨN)
+    # =========================
     try:
-        author_link = article_el.find_element(By.CSS_SELECTOR, "a[role='link'][href*='/user/']")
-        result["author_url"] = (author_link.get_attribute("href") or "").strip() or None
-        name = (author_link.text or "").strip()
-        if name:
-            result["nickname"] = name
-        else:
-            try:
-                span = author_link.find_element(By.CSS_SELECTOR, "span[dir='auto']")
-                result["nickname"] = (span.text or "").strip() or None
-            except Exception:
-                pass
+        # Ưu tiên lấy author_url từ các link profile/user phổ biến (kể cả avatar link).
+        # Dùng XPath relative (.//) để giới hạn trong article_el.
+        author_link = article_el.find_element(
+            By.XPATH,
+            ".//a[contains(@href,'/user/') or contains(@href,'profile.php') or contains(@href,'/people/')]",
+        )
+
+        href = (author_link.get_attribute("href") or "").strip()
+        if href and href != "#":
+            result["author_url"] = href
+
     except Exception:
-        # fallback từ aria-label="Bình luận dưới tên Nom Nim ..."
+        # fallback từ aria-label
         try:
             aria = (article_el.get_attribute("aria-label") or "").strip()
-            m = re.search(r"tên\\s+(.+?)\\s+vào\\s+", aria, flags=re.IGNORECASE)
+            m = re.search(r"tên\s+(.+?)\s+vào\s+", aria, flags=re.IGNORECASE)
             if m:
                 result["nickname"] = m.group(1).strip()
         except Exception:
             pass
 
-    # content (giới hạn trong article)
+    # Nếu nickname vẫn chưa có, thử thêm vài pattern khác (group/page có thể khác wording).
+    if not result.get("nickname"):
+        try:
+            aria = (article_el.get_attribute("aria-label") or "").strip()
+            # Ví dụ: "Comment under the name X at ..."
+            m = re.search(r"(?:dưới\s+tên|under\s+the\s+name)\s+(.+?)\s+(?:vào|at)\s+", aria, flags=re.IGNORECASE)
+            if m:
+                result["nickname"] = m.group(1).strip()
+        except Exception:
+            pass
+
+    # =========================
+    # content (FIX selector + lọc noise)
+    # =========================
     try:
-        parts = article_el.find_elements(By.CSS_SELECTOR, "div[dir='auto'][style*='text-align: start']")
-        text = " ".join((p.text or "").strip() for p in parts if (p.text or "").strip()).strip()
-        result["comment"] = text or None
+        # Selector FB thay đổi liên tục; ưu tiên gom text từ node dir=auto rồi lọc noise.
+        candidates = []
+        # try:
+        #     candidates = article_el.find_elements(By.CSS_SELECTOR, "[data-ad-preview='message']")
+        # except Exception:
+        #     candidates = []
+
+        if not candidates:
+            candidates = article_el.find_elements(By.CSS_SELECTOR, "div[dir='auto'], span[dir='auto']")
+
+        seen_texts: Set[str] = set()
+        texts: List[str] = []
+        nickname = (result.get("nickname") or "").strip()
+        time_text = (result.get("time") or "").strip()
+
+        for node in candidates:
+            raw = (node.text or "").strip()
+            normalized = _normalize_comment_text(raw)
+            if not normalized:
+                continue
+            if nickname and normalized == nickname:
+                continue
+            if time_text and normalized == time_text:
+                continue
+            if normalized in seen_texts:
+                continue
+            seen_texts.add(normalized)
+            texts.append(normalized)
+
+        # FB hay render cùng 1 comment thành nhiều node (full text + các đoạn con),
+        # dẫn tới list có phần tử bị "lồng" (substring) như ví dụ user gửi.
+        if texts:
+            ordered = sorted(texts, key=len, reverse=True)
+            filtered: List[str] = []
+            for t in ordered:
+                if any(t != kept and t in kept for kept in filtered):
+                    continue
+                filtered.append(t)
+            # trả về theo thứ tự xuất hiện gần đúng (ngắn->dài sorting phá order)
+            filtered_set = set(filtered)
+            result["comment"] = [t for t in texts if t in filtered_set] or None
+        else:
+            result["comment"] = None
+
     except Exception:
         pass
 
+    # =========================
     # reactions
+    # =========================
     try:
-        react_btn = article_el.find_element(By.CSS_SELECTOR, "[role='button'][aria-label*='cảm xúc']")
-        label = (react_btn.get_attribute("aria-label") or "").strip()
-        if label:
-            result["react_count"] = _parse_engagement_count(label)
-        else:
-            result["react_count"] = _parse_engagement_count(react_btn.text or "")
+        # FB có thể để số reaction ở nhiều node khác nhau; lấy max nếu tìm thấy.
+        possible_counts: List[int] = []
+
+        # 1) aria-label tiếng Việt/Anh thường chứa 'cảm xúc' / 'reaction'
+        for sel in (
+            "[aria-label*='cảm xúc']",
+            "[aria-label*='Bày tỏ cảm xúc']",
+            "[aria-label*='reaction']",
+            "[aria-label*='React']",
+        ):
+            try:
+                els = article_el.find_elements(By.CSS_SELECTOR, sel)
+            except Exception:
+                els = []
+            for e in els:
+                label = (e.get_attribute("aria-label") or "").strip()
+                if label:
+                    possible_counts.append(_parse_engagement_count(label))
+                txt = (e.text or "").strip()
+                if txt:
+                    possible_counts.append(_parse_engagement_count(txt))
+
+        # 2) fallback: scan toàn bộ button/link trong article, pick max parseable number
+        if not possible_counts:
+            try:
+                els = article_el.find_elements(By.CSS_SELECTOR, "[role='button'], a")
+            except Exception:
+                els = []
+            for e in els:
+                label = (e.get_attribute("aria-label") or "").strip()
+                if label:
+                    possible_counts.append(_parse_engagement_count(label))
+                txt = (e.text or "").strip()
+                if txt:
+                    possible_counts.append(_parse_engagement_count(txt))
+
+        result["react_count"] = max([c for c in possible_counts if isinstance(c, int)], default=0)
+
     except Exception:
         result["react_count"] = 0
 
+    
     return result
+
 
 
 def parse_comment(driver, post_link, source_url):
@@ -628,32 +920,54 @@ def parse_comment(driver, post_link, source_url):
         return []
 
     driver.get(post_link)
-
-    try:
-        root = driver.find_element(By.TAG_NAME, "body")
-    except Exception:
-        root = None
+    logger.info(f"Redirect to {post_link}...")
+    post_id = _extract_post_id_from_link(post_link)
 
     seen: Set[str] = set()
     collected: List[dict] = []
     stable_rounds = 0
+    clicked_fingerprints: Set[str] = set()
 
     for _ in range(80):
         try:
+            root = _find_comment_context_root(driver)
+        except Exception:
+            root = None
+
+        try:
             if root is not None:
-                expand_post_and_comments_until_done(driver, root)
+                _select_all_comments_filter(driver, root=root, timeout=2.0)
+        except Exception:
+            pass
+
+        try:
+            if root is not None:
+                expand_comments_near_viewport(
+                    driver,
+                    root,
+                    clicked_fingerprints,
+                    margin_px=EXPAND_VIEWPORT_MARGIN_PX,
+                    max_clicks=EXPAND_MAX_CLICKS_PER_ROUND,
+                    pause_after_click=0.35,
+                )
         except Exception:
             pass
 
         new_this_round = 0
         try:
-            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href*='comment_id=']")
+            if root is not None:
+                anchors = root.find_elements(By.CSS_SELECTOR, "a[href*='comment_id=']")
+            else:
+                anchors = driver.find_elements(By.CSS_SELECTOR, "a[href*='comment_id=']")
         except Exception:
             anchors = []
 
         for a in anchors:
             try:
                 href = (a.get_attribute("href") or "").strip()
+                # Tránh lẫn anchors từ background feed: filter theo post_id nếu có.
+                if post_id and post_id not in href:
+                    continue
                 ids = _extract_comment_ids_from_href(href)
                 comment_id = ids.get("comment_id")
                 reply_comment_id = ids.get("reply_comment_id")
@@ -662,10 +976,12 @@ def parse_comment(driver, post_link, source_url):
                     continue
 
                 article = _closest_comment_article(driver, a)
+                
                 if article is None:
                     continue
 
                 detail = _extract_comment_detail_from_article(article)
+                # logger.info("Comments info: ", detail)
                 if not detail.get("comment_id") and comment_id:
                     detail["comment_id"] = comment_id
                 if not detail.get("reply_comment_id") and reply_comment_id:
@@ -686,11 +1002,30 @@ def parse_comment(driver, post_link, source_url):
         else:
             stable_rounds = 0
 
-        if stable_rounds >= 4:
+        # Chỉ dừng sớm khi đã thu được comment và không còn tăng nữa.
+        # Trường hợp mới mở post, comment có thể chỉ load sau khi scroll trong khung post.
+        if stable_rounds >= 4 and collected:
+            break
+        if stable_rounds >= 12:
             break
 
+        # Prune DOM theo article đã processed để tránh DOM phình.
         try:
-            driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight * 0.9));")
+            if root is not None and seen:
+                prune_processed_comment_articles(
+                    driver,
+                    root,
+                    seen,
+                    keep_anchors=KEEP_ANCHORS,
+                    prune_buffer=PRUNE_BUFFER,
+                    max_articles=PRUNE_MAX_ARTICLES_PER_ROUND,
+                    protect_margin_px=EXPAND_VIEWPORT_MARGIN_PX,
+                )
+        except Exception:
+            pass
+
+        try:
+            _scroll_comment_context(driver, root)
         except Exception:
             break
         time.sleep(0.75)
@@ -770,21 +1105,29 @@ def get_post_timestamp_and_id(driver, post_element, source_url: str) -> dict:
         "post_id": "",
         "post_id_raw": "",
     }
-
+    wait = WebDriverWait(driver, 0.5)
     try:
         actions = ActionChains(driver)
         links = post_element.find_elements(By.CSS_SELECTOR, "[role='link']")
 
         for el in links:
+
             try:
                 actions.move_to_element(el).perform()
-                time.sleep(0.3)
+                wait.until(lambda d: el.get_attribute("href") is not None)
+
+                # tooltip = wait.until(
+                #     EC.presence_of_element_located((By.CSS_SELECTOR, "[role='tooltip']"))
+                # )
+                # wait.until(lambda d: tooltip.text.strip() != "")
 
                 href = el.get_attribute("href")
+                print("href: ", href)
                 if not href:
                     continue
 
                 if "facebook.com/groups" in href and "/posts/" in href:
+                     
                     result["timestamp_url"] = href
 
                     # ✅ Ưu tiên lấy từ aria-label hoặc title (không bị nhiễu)
@@ -913,52 +1256,78 @@ def _find_post_content_roots(post_element, source_url: str):
     return [post_element]
 
 
-def _expand_post_content(driver, post_element, source_url: str) -> None:
-    wait = WebDriverWait(driver, 2)
-    max_iterations = 3
+POST_SEE_MORE_PATTERNS = [
+    "xem thêm",
+    "see more",
+]
 
-    for _ in range(max_iterations):
-        try:
-            clicked_any = False
-            for root in _find_post_content_roots(post_element, source_url):
+
+def expand_post_content_until_done(
+    driver: "WebDriver",
+    post_element: "WebElement",
+    source_url: str,
+    *,
+    pause_after_click: float = 0.2,
+    max_rounds: int = 3,
+) -> int:
+    """
+    Phase 1 helper: chỉ bung nội dung bài viết (ví dụ nút 'Xem thêm' trong content),
+    KHÔNG đụng tới comment/reply và KHÔNG scroll để load comment.
+    """
+    total_clicked = 0
+    clicked_fingerprints: Set[str] = set()
+
+    for _ in range(max_rounds):
+        clicked_this_round = 0
+
+        for root in _find_post_content_roots(post_element, source_url):
+            try:
+                buttons = root.find_elements(
+                    By.XPATH,
+                    ".//*[self::div or self::span]"
+                    "[@role='button' and (normalize-space(.)='Xem thêm' or normalize-space(.)='See more')]",
+                )
+            except Exception:
+                continue
+
+            for btn in buttons:
                 try:
-                    xem_them_buttons = root.find_elements(
-                        By.XPATH,
-                        "//div[normalize-space(text())='Xem thêm']",
+                    if not _element_visible_enabled(btn):
+                        continue
+
+                    label = _normalize_text(btn.text) or _normalize_text(
+                        btn.get_attribute("aria-label")
                     )
+                    if not label:
+                        continue
+                    if not any(pat == label for pat in POST_SEE_MORE_PATTERNS):
+                        continue
+
+                    fp = f"{label}|{btn.get_attribute('outerHTML')[:200]}"
+                    if fp in clicked_fingerprints:
+                        continue
+
+                    if _safe_click(driver, btn):
+                        clicked_fingerprints.add(fp)
+                        clicked_this_round += 1
+                        total_clicked += 1
+                        time.sleep(pause_after_click)
+                except StaleElementReferenceException:
+                    continue
                 except Exception:
                     continue
 
-                for button in xem_them_buttons:
-                    try:
-                        if not button.is_displayed():
-                            continue
-
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
-                            button,
-                        )
-                        wait.until(lambda _driver: button.is_displayed() and button.is_enabled())
-                        driver.execute_script("arguments[0].click();", button)
-                        clicked_any = True
-
-                        try:
-                            wait.until(
-                                lambda _driver: not button.is_displayed() or EC.staleness_of(button)(_driver)
-                            )
-                        except TimeoutException:
-                            pass
-                    except StaleElementReferenceException:
-                        continue
-                    except TimeoutException:
-                        continue
-                    except Exception:
-                        continue
-
-            if not clicked_any:
-                break
-        except Exception:
+        if clicked_this_round == 0:
             break
+
+    return total_clicked
+
+
+def _expand_post_content(driver, post_element, source_url: str) -> None:
+    try:
+        expand_post_content_until_done(driver, post_element, source_url)
+    except Exception:
+        return
 
 
 def _extract_content(driver, post_element, source_url: str) -> str:
@@ -1072,6 +1441,7 @@ def _extract_selector_post_context(driver, post_element, group_url: str) -> Dict
     engagement_counts, reaction_breakdown = _extract_engagement_counts(post_element, group_url)
     content = _extract_content(driver, post_element, group_url)
     timestamp_info = get_post_timestamp_and_id(driver, post_element, group_url)
+    print("timestamp_info: ", timestamp_info)
     # Phase 1: chỉ thu metadata + post link. Comment chi tiết sẽ cào ở phase 2
     # để tránh driver.get(post_link) làm stale DOM khi đang duyệt nhiều post.
     comments: list[dict] = []
@@ -1229,7 +1599,7 @@ def extract_best_selector_post(
     posts = collect_visible_selector_posts(driver, group_url)
 
     for post in posts:
-        expand_post_and_comments_until_done(driver, post)
+        expand_post_content_until_done(driver, post, group_url)
 
     logger.info(f"[DEBUG] elements count: {len(posts)}")
 
@@ -1304,6 +1674,13 @@ SKIP_PATTERNS = [
     "hành động với bài viết này",
 ]
 
+# Windowed expand + prune (tinh chỉnh theo máy/post)
+KEEP_ANCHORS = 250
+PRUNE_BUFFER = 150
+EXPAND_VIEWPORT_MARGIN_PX = 1200
+EXPAND_MAX_CLICKS_PER_ROUND = 30
+PRUNE_MAX_ARTICLES_PER_ROUND = 200
+
 
 def _normalize_text(text: Optional[str]) -> str:
     return " ".join((text or "").split()).strip().lower()
@@ -1370,6 +1747,377 @@ def _safe_click(driver: WebDriver, el: WebElement) -> bool:
         return False
 
 
+def _get_relative_top(driver: WebDriver, el: WebElement, container: WebElement | None) -> float | None:
+    """
+    Trả về `top` của element so với viewport của container (nếu có),
+    hoặc so với window viewport nếu container=None.
+    """
+    try:
+        return driver.execute_script(
+            """
+            const el = arguments[0];
+            const container = arguments[1];
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            if (!r) return null;
+            if (!container) return r.top;
+            const cr = container.getBoundingClientRect();
+            if (!cr) return null;
+            return (r.top - cr.top);
+            """,
+            el,
+            container,
+        )
+    except Exception:
+        return None
+
+
+def _is_near_viewport(driver: WebDriver, el: WebElement, container: WebElement | None, margin_px: int) -> bool:
+    try:
+        return bool(
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const container = arguments[1];
+                const margin = arguments[2] || 0;
+                if (!el) return false;
+
+                const r = el.getBoundingClientRect();
+                if (!r) return false;
+
+                if (!container) {
+                  const viewTop = -margin;
+                  const viewBottom = (window.innerHeight || 0) + margin;
+                  return (r.bottom >= viewTop) && (r.top <= viewBottom);
+                }
+
+                const cr = container.getBoundingClientRect();
+                if (!cr) return false;
+                const top = r.top - cr.top;
+                const bottom = r.bottom - cr.top;
+                const viewTop = -margin;
+                const viewBottom = (cr.height || 0) + margin;
+                return (bottom >= viewTop) && (top <= viewBottom);
+                """,
+                el,
+                container,
+                int(margin_px),
+            )
+        )
+    except Exception:
+        return False
+
+
+def _find_articles_near_viewport(
+    driver: WebDriver,
+    root: WebElement,
+    container: WebElement | None,
+    margin_px: int,
+) -> List[WebElement]:
+    try:
+        return driver.execute_script(
+            """
+            const root = arguments[0];
+            const container = arguments[1];
+            const margin = arguments[2] || 0;
+            if (!root) return [];
+
+            const els = root.querySelectorAll("[role='article']");
+            const res = [];
+
+            let viewHeight = window.innerHeight || 0;
+            let cTop = 0;
+            if (container) {
+              const cr = container.getBoundingClientRect();
+              viewHeight = cr && cr.height ? cr.height : viewHeight;
+              cTop = cr && typeof cr.top === 'number' ? cr.top : 0;
+            }
+
+            const viewTop = -margin;
+            const viewBottom = viewHeight + margin;
+
+            for (const el of els) {
+              try {
+                const r = el.getBoundingClientRect();
+                const top = container ? (r.top - cTop) : r.top;
+                const bottom = container ? (r.bottom - cTop) : r.bottom;
+                if (bottom >= viewTop && top <= viewBottom) res.push(el);
+              } catch (e) {}
+            }
+
+            return res;
+            """,
+            root,
+            container,
+            int(margin_px),
+        )
+    except Exception:
+        return []
+
+
+def expand_comments_near_viewport(
+    driver: WebDriver,
+    root: WebElement,
+    clicked_fingerprints: Set[str],
+    *,
+    margin_px: int = EXPAND_VIEWPORT_MARGIN_PX,
+    max_clicks: int = EXPAND_MAX_CLICKS_PER_ROUND,
+    pause_after_click: float = 0.35,
+) -> int:
+    if root is None:
+        return 0
+
+    container = _find_comment_scroll_target(driver, root)
+    articles = _find_articles_near_viewport(driver, root, container, margin_px=margin_px)
+
+    total_clicked = 0
+    for article in articles:
+        try:
+            buttons = _find_expand_buttons(article)
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+
+        for btn in buttons:
+            try:
+                label = (
+                    _normalize_text(btn.text)
+                    or _normalize_text(btn.get_attribute("aria-label"))
+                    or _normalize_text(btn.get_attribute("title"))
+                )
+                fp = f"{label}|{btn.get_attribute('outerHTML')[:200]}"
+                if fp in clicked_fingerprints:
+                    continue
+
+                if _safe_click(driver, btn):
+                    clicked_fingerprints.add(fp)
+                    total_clicked += 1
+                    time.sleep(pause_after_click)
+                    if total_clicked >= max_clicks:
+                        return total_clicked
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+
+    return total_clicked
+
+
+def prune_processed_comment_articles(
+    driver: WebDriver,
+    root: WebElement,
+    seen: Set[str],
+    *,
+    keep_anchors: int = KEEP_ANCHORS,
+    prune_buffer: int = PRUNE_BUFFER,
+    max_articles: int = PRUNE_MAX_ARTICLES_PER_ROUND,
+    protect_margin_px: int = EXPAND_VIEWPORT_MARGIN_PX,
+) -> int:
+    """
+    Prune DOM theo đơn vị [role="article"] (comment articles), chỉ xóa các article
+    đã processed (key in `seen`) và nằm ngoài vùng gần viewport.
+
+    Bù scroll để neo (cutoff_anchor) giữ vị trí, tránh cảm giác "giật".
+    """
+    if root is None:
+        return 0
+
+    try:
+        anchors = root.find_elements(By.CSS_SELECTOR, "a[href*='comment_id=']")
+    except Exception:
+        anchors = []
+
+    if len(anchors) <= (keep_anchors + prune_buffer):
+        return 0
+
+    cutoff_index = max(0, len(anchors) - keep_anchors)
+    if cutoff_index <= 0 or cutoff_index >= len(anchors):
+        return 0
+
+    cutoff_anchor = anchors[cutoff_index]
+    container = _find_comment_scroll_target(driver, root)
+
+    before_top = _get_relative_top(driver, cutoff_anchor, container)
+    if before_top is None:
+        return 0
+
+    prunable: List[WebElement] = []
+    seen_articles: Set[str] = set()
+
+    for a in anchors[:cutoff_index]:
+        try:
+            href = (a.get_attribute("href") or "").strip()
+            ids = _extract_comment_ids_from_href(href)
+            comment_id = ids.get("comment_id")
+            reply_comment_id = ids.get("reply_comment_id")
+            key = str(reply_comment_id or comment_id or "").strip()
+            if not key or key not in seen:
+                continue
+
+            article = _closest_comment_article(driver, a)
+            if article is None:
+                continue
+
+            # Không prune vùng gần viewport (tránh mất trước mắt)
+            if _is_near_viewport(driver, article, container, margin_px=protect_margin_px):
+                continue
+
+            fp = article.get_attribute("outerHTML")[:220]
+            if fp in seen_articles:
+                continue
+            seen_articles.add(fp)
+            prunable.append(article)
+            if len(prunable) >= max_articles:
+                break
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+
+    if not prunable:
+        return 0
+
+    removed = 0
+    for article in prunable:
+        try:
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                if (el && el.remove) el.remove();
+                """,
+                article,
+            )
+            removed += 1
+        except Exception:
+            continue
+
+    if removed <= 0:
+        return 0
+
+    after_top = _get_relative_top(driver, cutoff_anchor, container)
+    if after_top is None:
+        return removed
+
+    delta = after_top - before_top
+    if abs(delta) < 1:
+        return removed
+
+    try:
+        if container is not None:
+            driver.execute_script(
+                """
+                const container = arguments[0];
+                const delta = arguments[1];
+                if (container) container.scrollTop = (container.scrollTop || 0) + delta;
+                """,
+                container,
+                float(delta),
+            )
+        else:
+            driver.execute_script("window.scrollBy(0, arguments[0]);", float(delta))
+    except Exception:
+        pass
+
+    return removed
+
+
+COMMENT_SORT_DROPDOWN_PATTERNS = [
+    "phù hợp nhất",
+    "most relevant",
+    "top comments",
+    "relevant",
+]
+
+ALL_COMMENTS_PATTERNS = [
+    "tất cả bình luận",
+    "all comments",
+]
+
+
+def _select_all_comments_filter(
+    driver: WebDriver,
+    root: Optional[WebElement] = None,
+    timeout: float = 2.0,
+) -> bool:
+    """
+    Chọn filter 'Tất cả bình luận' (All comments) nếu đang ở 'Phù hợp nhất' (Most relevant).
+
+    Lưu ý: menu có thể render ở layer global (document.body), nên tìm option theo `driver`.
+    Hàm chạy best-effort, không raise.
+    """
+    try:
+        scope = root if root is not None else driver
+        buttons = scope.find_elements(By.CSS_SELECTOR, "[role='button']")
+    except Exception:
+        buttons = []
+
+    dropdown = None
+    for btn in buttons:
+        try:
+            label = (
+                _normalize_text(btn.text)
+                or _normalize_text(btn.get_attribute("aria-label"))
+                or _normalize_text(btn.get_attribute("title"))
+            )
+            if not label:
+                continue
+            if any(pat in label for pat in ALL_COMMENTS_PATTERNS):
+                return True
+            if any(pat in label for pat in COMMENT_SORT_DROPDOWN_PATTERNS):
+                dropdown = btn
+                break
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+
+    if dropdown is None:
+        return False
+
+    if not _safe_click(driver, dropdown):
+        return False
+
+    # Đợi menu xuất hiện và click 'Tất cả bình luận' / 'All comments'
+    wait = WebDriverWait(driver, timeout)
+
+    def _pick_all_comments(_driver: WebDriver) -> bool:
+        try:
+            candidates = _driver.find_elements(
+                By.XPATH,
+                "//*[@role='menuitem' or @role='menuitemradio' or @role='option' or @role='radio']",
+            )
+        except Exception:
+            candidates = []
+
+        for el in candidates:
+            try:
+                text = (
+                    _normalize_text(el.text)
+                    or _normalize_text(el.get_attribute("aria-label"))
+                    or _normalize_text(el.get_attribute("title"))
+                )
+                if not text:
+                    continue
+                if any(pat == text for pat in ALL_COMMENTS_PATTERNS):
+                    return _safe_click(_driver, el)
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+
+        return False
+
+    try:
+        wait.until(_pick_all_comments)
+        time.sleep(0.2)
+        return True
+    except TimeoutException:
+        return False
+    except Exception:
+        return False
+
+
 def _find_expand_buttons(root: WebElement) -> List[WebElement]:
     """
     Tìm các button/div/span/a có text kiểu 'Xem thêm', 'Xem tất cả 2 phản hồi',...
@@ -1417,7 +2165,7 @@ def _find_expand_buttons(root: WebElement) -> List[WebElement]:
     return results
 
 
-def expand_post_and_comments_until_done(
+def expand_comments_until_done(
     driver: WebDriver,
     root: WebElement,
     pause_after_click: float = 0.35,
@@ -1425,6 +2173,12 @@ def expand_post_and_comments_until_done(
 ) -> int:
     total_clicked = 0
     clicked_fingerprints: Set[str] = set()
+
+    # # Ưu tiên chuyển sang 'Tất cả bình luận' trước khi bung comment/scroll.
+    # try:
+    #     _select_all_comments_filter(driver, root=root, timeout=2.0)
+    # except Exception:
+    #     pass
 
     for _ in range(max_rounds):
         try:
