@@ -122,6 +122,7 @@ def main() -> int:
 
     try:
         result = run_request(args.api_key)
+        print(f"Dequeue request to {result.url} returned status {result.status_code}.")
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

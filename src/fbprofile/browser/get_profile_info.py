@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -146,6 +147,165 @@ def _count_unique_selector_values(
         if value:
             values.add(value)
     return len(values)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _count_profile_friend_links_fast(driver) -> int:
+    """Count friend profile links in one browser-side pass."""
+    script = """
+        const xpath = "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]//a[@role='link' and @href]";
+        const snapshot = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        const values = new Set();
+        for (let i = 0; i < snapshot.snapshotLength; i += 1) {
+            const href = snapshot.snapshotItem(i).getAttribute("href") || "";
+            if (href) values.add(href);
+        }
+        return values.size;
+    """
+    try:
+        return int(driver.execute_script(script) or 0)
+    except Exception:
+        return _count_unique_selector_values(
+            driver,
+            "profile.friends.link",
+            attr="href",
+        )
+
+
+def _extract_profile_friends_fast(driver) -> list[dict]:
+    """Extract friend cards in one JS call to avoid thousands of Selenium round trips."""
+    script = """
+        const cardXpath = "//div[contains(@class, 'x1iyjqo2') and contains(@class, 'xv54qhq')]";
+        const snapshot = document.evaluate(cardXpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        const rows = [];
+        const seen = new Set();
+        for (let i = 0; i < snapshot.snapshotLength; i += 1) {
+            const card = snapshot.snapshotItem(i);
+            const link = card.querySelector("a[role='link'][href]");
+            if (!link) continue;
+            const href = link.getAttribute("href") || "";
+            const name = (link.innerText || link.textContent || "").trim();
+            if (!href || !name || seen.has(href)) continue;
+            seen.add(href);
+            const subtitleEl = card.querySelector("div.x1gslohp");
+            const avatarEl =
+                card.querySelector("img") ||
+                (card.previousElementSibling ? card.previousElementSibling.querySelector("img") : null);
+            rows.push({
+                name,
+                profile_url: href,
+                avatar_url: avatarEl ? avatarEl.getAttribute("src") : null,
+                subtitle: subtitleEl ? (subtitleEl.innerText || subtitleEl.textContent || "").trim() : "",
+            });
+        }
+        return rows;
+    """
+    try:
+        rows = driver.execute_script(script) or []
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    cleaned = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        profile_url = row.get("profile_url")
+        name = row.get("name")
+        if not profile_url or not name or profile_url in seen:
+            continue
+        seen.add(profile_url)
+        cleaned.append(
+            {
+                "name": name,
+                "profile_url": profile_url,
+                "avatar_url": row.get("avatar_url"),
+                "subtitle": row.get("subtitle") or "",
+            }
+        )
+    return cleaned
+
+
+def _collect_visible_photo_links_fast(driver) -> set[str]:
+    """Collect loaded photo links in one browser-side pass."""
+    script = """
+        const selectors = [
+          "a[href*='photo.php']",
+          "a[href*='/photo/']",
+          "a[href*='fbid=']",
+          "a[href*='/photos/']"
+        ].join(",");
+        const values = new Set();
+        for (const a of document.querySelectorAll(selectors)) {
+          let href = a.href || a.getAttribute("href") || "";
+          if (!href) continue;
+          try {
+            const url = new URL(href, location.href);
+            url.searchParams.delete("__cft__");
+            url.searchParams.delete("__tn__");
+            href = url.href;
+          } catch (_) {}
+          if (
+            href.includes("photo.php") ||
+            href.includes("/photo/") ||
+            href.includes("fbid=") ||
+            href.includes("/photos/")
+          ) {
+            values.add(href);
+          }
+        }
+        return Array.from(values);
+    """
+    try:
+        links = driver.execute_script(script) or []
+    except Exception:
+        links = []
+    return {link for link in links if isinstance(link, str) and link}
+
+
+def _largest_fbcdn_image_fast(driver) -> str | None:
+    """Return the largest loaded fbcdn image using one JS pass."""
+    script = """
+        let best = null;
+        let bestArea = 0;
+        for (const img of document.querySelectorAll("img[src*='fbcdn.net']")) {
+          const src = img.currentSrc || img.src || img.getAttribute("src") || "";
+          const width = Number(img.naturalWidth || img.width || 0);
+          const height = Number(img.naturalHeight || img.height || 0);
+          const area = width * height;
+          if (src && area > bestArea) {
+            best = src;
+            bestArea = area;
+          }
+        }
+        return best;
+    """
+    try:
+        value = driver.execute_script(script)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 def _extract_text_from_selector(driver, selector_name: str, timeout: int | None = None, **format_kwargs) -> str | None:
@@ -502,76 +662,128 @@ def get_profile_high_res_pictures(
     target_url,
     timeout=5,
     max_photos=None,
+    batch_size=8,
     scroll_until_stable_cfg: Dict[str, Any] | None = None,
 ):
-    high_res_images = []
+    high_res_images = set()
     photos_url = f"{target_url}/photos" if "profile.php" not in target_url else f"{target_url}&sk=photos"
 
     driver.get(photos_url)
     time.sleep(3)
 
-    scroll_until_stable(
+    photo_links: set[str] = set()
+
+    def collect_count() -> int:
+        photo_links.update(_collect_visible_photo_links_fast(driver))
+        return len(photo_links)
+
+    photos_scroll_cfg = dict(scroll_until_stable_cfg or {})
+    for cfg_key in (
+        "max_scrolls",
+        "stable_rounds",
+        "max_items",
+        "max_seconds",
+        "min_new_items",
+        "slow_rounds",
+        "scroll_pause_seconds",
+        "settle_pause_seconds",
+    ):
+        photos_scroll_cfg.pop(cfg_key, None)
+    env_overrides = {
+        "PROFILE_PHOTOS_MAX_SCROLLS": "max_scrolls",
+        "PROFILE_PHOTOS_STABLE_ROUNDS": "stable_rounds",
+        "PROFILE_PHOTOS_MAX_ITEMS": "max_items",
+        "PROFILE_PHOTOS_MAX_SECONDS": "max_seconds",
+        "PROFILE_PHOTOS_MIN_NEW_ITEMS": "min_new_items",
+        "PROFILE_PHOTOS_SLOW_ROUNDS": "slow_rounds",
+    }
+    for env_key, cfg_key in env_overrides.items():
+        if env_key in os.environ:
+            photos_scroll_cfg[cfg_key] = os.environ.get(env_key)
+
+    scroll_result = scroll_until_stable(
         driver,
-        get_progress_count=lambda: _count_unique_selector_values(
-            driver,
-            "profile.photos.link",
-            attr="href",
-        ),
+        get_progress_count=collect_count,
         log_prefix="[PROFILE][PHOTOS]",
-        config=scroll_until_stable_cfg,
+        config=photos_scroll_cfg,
         defaults={
-            "max_scrolls": 80,
+            "max_scrolls": _env_int("PROFILE_PHOTOS_MAX_SCROLLS", 120),
             "stable_rounds": 3,
-            "scroll_pause_seconds": 2.0,
-            "settle_pause_seconds": 0.5,
+            "scroll_pause_seconds": _env_float("PROFILE_PHOTOS_SCROLL_PAUSE_SECONDS", 1.2),
+            "settle_pause_seconds": _env_float("PROFILE_PHOTOS_SETTLE_PAUSE_SECONDS", 0.3),
+            "max_items": _env_int("PROFILE_PHOTOS_MAX_ITEMS", 0),
+            "max_seconds": _env_float("PROFILE_PHOTOS_MAX_SECONDS", 0.0),
+            "min_new_items": _env_int("PROFILE_PHOTOS_MIN_NEW_ITEMS", 0),
+            "slow_rounds": _env_int("PROFILE_PHOTOS_SLOW_ROUNDS", 0),
         },
     )
+    collect_count()
 
-    photo_links = set()
-    photo_elements = _find_elements_by_selector(driver, "profile.photos.link", timeout=timeout)
-
-    for el in photo_elements:
-        href = el.get_attribute("href")
-        if href:
-            photo_links.add(href)
-
-    photo_links = list(photo_links)
+    photo_links = sorted(photo_links)
     if max_photos:
         photo_links = photo_links[:max_photos]
 
-    for link in photo_links:
+    logger.info(
+        "[PROFILE][PHOTOS] Collected %s photo link(s) after %s scroll(s)",
+        len(photo_links),
+        scroll_result.get("iterations"),
+    )
+    if not photo_links:
+        return []
+
+    try:
+        main_window = driver.current_window_handle
+    except Exception:
+        return []
+
+    batch_size = max(1, _env_int("PROFILE_PHOTOS_BATCH_SIZE", batch_size or 8))
+    wait = WebDriverWait(driver, timeout)
+
+    for i in range(0, len(photo_links), batch_size):
+        batch = photo_links[i:i + batch_size]
+        logger.info("[PROFILE][PHOTOS] Resolving high-res batch %d-%d", i + 1, i + len(batch))
+
         try:
-            driver.get(link)
-            time.sleep(2)
-
-            imgs = _find_elements_by_selector(driver, "profile.photos.highres_img", timeout=timeout)
-            if not imgs:
-                raise TimeoutException("high resolution image not found")
-
-            max_img = None
-            max_area = 0
-
-            for img in imgs:
+            for link in batch:
                 try:
-                    width = int(img.get_attribute("naturalWidth") or 0)
-                    height = int(img.get_attribute("naturalHeight") or 0)
-                    if width * height > max_area:
-                        max_area = width * height
-                        max_img = img
-                except Exception:
+                    driver.execute_script("window.open(arguments[0], '_blank');", link)
+                except Exception as exc:
+                    logger.debug("[PROFILE][PHOTOS] open tab failed for %s: %s", link, exc)
+
+            time.sleep(1.0)
+
+            for window in list(driver.window_handles):
+                if window == main_window:
                     continue
+                try:
+                    driver.switch_to.window(window)
+                    try:
+                        wait.until(EC.presence_of_element_located((By.XPATH, "//img[contains(@src,'fbcdn.net')]")))
+                    except Exception:
+                        pass
 
-            if max_img:
-                src = max_img.get_attribute("src")
-                if src:
-                    high_res_images.append(src)
+                    src = _largest_fbcdn_image_fast(driver)
+                    if src:
+                        high_res_images.add(src)
+                except Exception as exc:
+                    logger.debug("[PROFILE][PHOTOS] high-res parse failed: %s", exc)
+                finally:
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
 
-            time.sleep(1.5)
+            driver.switch_to.window(main_window)
+            time.sleep(0.5)
 
-        except Exception:
-            continue
+        except Exception as exc:
+            logger.debug("[PROFILE][PHOTOS] batch failed: %s", exc)
+            try:
+                driver.switch_to.window(main_window)
+            except Exception:
+                pass
 
-    return list(set(high_res_images))
+    return sorted(high_res_images)
 # ==========================================
 # 5. FRIENDS (Bạn bè)
 # ==========================================
@@ -593,24 +805,57 @@ def get_profile_friends(
         time.sleep(3)
 
         logger.info("[PROFILE] Đang cuộn danh sách bạn bè đến khi ổn định...")
-        scroll_until_stable(
+        friends_scroll_cfg = dict(scroll_until_stable_cfg or {})
+        for cfg_key in (
+            "max_scrolls",
+            "stable_rounds",
+            "max_items",
+            "max_seconds",
+            "min_new_items",
+            "slow_rounds",
+            "scroll_pause_seconds",
+            "settle_pause_seconds",
+        ):
+            friends_scroll_cfg.pop(cfg_key, None)
+        env_overrides = {
+            "PROFILE_FRIENDS_MAX_SCROLLS": "max_scrolls",
+            "PROFILE_FRIENDS_STABLE_ROUNDS": "stable_rounds",
+            "PROFILE_FRIENDS_MAX_ITEMS": "max_items",
+            "PROFILE_FRIENDS_MAX_SECONDS": "max_seconds",
+            "PROFILE_FRIENDS_MIN_NEW_ITEMS": "min_new_items",
+            "PROFILE_FRIENDS_SLOW_ROUNDS": "slow_rounds",
+        }
+        for env_key, cfg_key in env_overrides.items():
+            if env_key in os.environ:
+                friends_scroll_cfg[cfg_key] = os.environ.get(env_key)
+
+        scroll_result = scroll_until_stable(
             driver,
-            get_progress_count=lambda: _count_unique_selector_values(
-                driver,
-                "profile.friends.link",
-                attr="href",
-            ),
+            get_progress_count=lambda: _count_profile_friend_links_fast(driver),
             log_prefix="[PROFILE][FRIENDS]",
-            config=scroll_until_stable_cfg,
+            config=friends_scroll_cfg,
             defaults={
-                "max_scrolls": 50,
+                "max_scrolls": _env_int("PROFILE_FRIENDS_MAX_SCROLLS", 30),
                 "stable_rounds": 3,
-                "scroll_pause_seconds": 2.0,
-                "settle_pause_seconds": 0.5,
+                "scroll_pause_seconds": _env_float("PROFILE_FRIENDS_SCROLL_PAUSE_SECONDS", 1.2),
+                "settle_pause_seconds": _env_float("PROFILE_FRIENDS_SETTLE_PAUSE_SECONDS", 0.3),
+                "max_items": _env_int("PROFILE_FRIENDS_MAX_ITEMS", 0),
+                "max_seconds": _env_float("PROFILE_FRIENDS_MAX_SECONDS", 0.0),
+                "min_new_items": _env_int("PROFILE_FRIENDS_MIN_NEW_ITEMS", 0),
+                "slow_rounds": _env_int("PROFILE_FRIENDS_SLOW_ROUNDS", 0),
             },
         )
 
         logger.info("[PROFILE] Đang trích xuất dữ liệu bạn bè...")
+        fast_friends = _extract_profile_friends_fast(driver)
+        if fast_friends:
+            logger.info(
+                "[PROFILE][FRIENDS] Fast extracted %s friend(s) after %s scroll(s)",
+                len(fast_friends),
+                scroll_result.get("iterations"),
+            )
+            return fast_friends
+
         info_divs = _find_elements_by_selector(driver, "profile.friends.card", timeout=timeout)
 
         for info in info_divs:
@@ -669,7 +914,7 @@ def scrape_full_profile_info(
     include_featured_news = True
     include_introduction = True
     include_photos = True
-    include_friends = True
+    include_friends = _env_bool("PROFILE_INCLUDE_FRIENDS", True)
 
     full_data = {
         "url": target_url,

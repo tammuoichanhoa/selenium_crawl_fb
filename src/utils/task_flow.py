@@ -120,7 +120,12 @@ def post_event(
                 response.text.strip(),
             )
         elif response.text.strip():
-            logger.info("[event] Response for task_id=%s (type=%s): %s", task_id, event_type, response.text.strip())
+            logger.info(
+                "[event] Response for task_id=%s (type=%s): %s",
+                task_id,
+                event_type,
+                response.text.strip(),
+            )
     except Exception as exc:
         logger.error(
             "[event] Exception posting %s for task_id=%s: %s",
@@ -166,31 +171,16 @@ def post_type_clone_event(
                 response.text.strip(),
             )
         elif response.text.strip():
-            logger.info("[event] Response for task_id=%s (type=type_clone): %s", task_id, response.text.strip())
+            logger.info(
+                "[event] Response for task_id=%s (type=type_clone): %s",
+                task_id,
+                response.text.strip(),
+            )
     except Exception as exc:
         logger.error(
             "[event] Exception posting type_clone for task_id=%s: %s",
             task_id,
             exc,
-        )
-
-        if response.text.strip():
-            logger.info(
-                "[event] Response for task_id=%s: %s",
-                task_id,
-                response.text.strip(),
-            )
-
-    except requests.RequestException as e:
-        response_text = ""
-        if getattr(e, "response", None) is not None and e.response is not None:
-            response_text = e.response.text.strip()
-
-        logger.error(
-            "[event] Failed to post task_id=%s: %s%s",
-            task_id,
-            str(e),
-            f" | response={response_text}" if response_text else "",
         )
         
 def extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
