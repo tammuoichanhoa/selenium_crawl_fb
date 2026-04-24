@@ -5,7 +5,7 @@ from typing import Set, Dict, Any
 
 from logs.loging_config import logger
 from ..browser.hooks import CLEANUP_JS
-from .selector_posts import process_visible_selector_posts
+from .selector.post_extractor import process_visible_selector_posts
 from .stable_scroll import get_scroll_height, normalize_scroll_until_stable_cfg
 
 

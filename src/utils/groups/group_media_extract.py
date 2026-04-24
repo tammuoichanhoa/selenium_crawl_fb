@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from logs.loging_config import logger
-from src.fbprofile.browser.selector_posts import extract_best_selector_post
+from src.fbprofile.browser.selector.post_extractor import extract_best_selector_post
 
 try:
     from .get_graphql_response import extract_media_page

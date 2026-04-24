@@ -1,7 +1,14 @@
+"""
+crawlers/
+=========
+Re-export các hàm công khai để code bên ngoài không cần biết cấu trúc nội bộ.
 
-from . import selector as selector_posts
-from .selector.comment_extractor import parse_comment
-from .selector.post_extractor import (
+Ví dụ:
+    from src.crawlers import extract_selector_post, parse_comment
+"""
+
+from .comment_extractor import parse_comment
+from .post_extractor import (
     collect_visible_selector_posts,
     extract_best_selector_post,
     extract_selector_post,
@@ -9,7 +16,6 @@ from .selector.post_extractor import (
 )
 
 __all__ = [
-    "selector_posts",
     "parse_comment",
     "collect_visible_selector_posts",
     "extract_best_selector_post",
