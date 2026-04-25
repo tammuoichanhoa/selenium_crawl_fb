@@ -12,6 +12,7 @@
     "wait_between_pages": 2,
     "element_timeout": 15,
     "output_file": "crawl_results.json",
+    "run_generic_selector_after_info": false,
     "user_agent_rotation": true,
     "proxy_rotation": false,
     "scroll_until_stable": {

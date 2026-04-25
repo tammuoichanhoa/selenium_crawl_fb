@@ -8,7 +8,7 @@ import queue
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 import datetime
 from pathlib import Path
 import traceback
@@ -19,10 +19,10 @@ from src.fbprofile.storage.paths import compute_paths
 from src.fbprofile.browser.hooks import flush_gql_recs, install_early_hook
 from src.fbprofile.browser.get_profile_info import scrape_full_profile_info
 from src.fbprofile.browser.navigation import go_to_date
-from src.fbprofile.browser.scroll import crawl_scroll_loop
+from src.fbprofile.browser.scroll import crawl_scroll_loop, drain_pending_gql_records
 from src.fbprofile.storage.checkpoint import save_checkpoint
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = str(Path(__file__).resolve().parent)
 
 from src.utils import (
     build_port_queue,
@@ -58,9 +58,8 @@ GO_TO_DATE_FIELD_NAMES = (
     "crawl_date",
 )
 DEFAULT_MOBILE_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 13; SM-G991B) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Mobile Safari/537.36"
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
 )
 MOBILE_MORE_CONTENT_MARKERS = (
     "còn nhiều nội dung khác đáng xem",
@@ -216,18 +215,183 @@ def _crawl_target_url_for_error(crawl_target: Any) -> str:
     return str(value or "")
 
 
-def _to_mobile_facebook_url(url: str) -> str:
+def _crawl_target_login_method(crawl_target: Any) -> str | None:
+    value = None
+    if isinstance(crawl_target, dict):
+        value = crawl_target.get("login_method")
+    elif isinstance(crawl_target, (tuple, list)) and len(crawl_target) > 3:
+        value = crawl_target[3]
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    return value or None
+
+
+def _crawl_target_cookies(crawl_target: Any) -> str | None:
+    value = None
+    if isinstance(crawl_target, dict):
+        value = crawl_target.get("cookies")
+    elif isinstance(crawl_target, (tuple, list)) and len(crawl_target) > 4:
+        value = crawl_target[4]
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _crawl_target_profile_backup_name(crawl_target: Any) -> str | None:
+    value = None
+    if isinstance(crawl_target, dict):
+        value = crawl_target.get("profile_backup_name")
+    elif isinstance(crawl_target, (tuple, list)) and len(crawl_target) > 5:
+        value = crawl_target[5]
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _crawl_target_auto_anonymous_first(crawl_target: Any) -> bool:
+    if isinstance(crawl_target, dict):
+        return bool(crawl_target.get("auto_anonymous_first"))
+    elif isinstance(crawl_target, (tuple, list)) and len(crawl_target) > 6:
+        return bool(crawl_target[6])
+    return False
+
+
+def _normalize_crawl_url(uid_or_url: str) -> str:
+    raw = str(uid_or_url or "").strip()
+    if raw.startswith("http"):
+        return raw
+    return f"https://www.facebook.com/{raw.lstrip('/')}"
+
+
+def _crawl_storage_name(url: str) -> str:
+    raw = str(url or "").strip()
+    trimmed = raw.rstrip("/")
+    url_name = trimmed.split("/")[-1].split("?")[0]
+    return url_name or raw
+
+
+def _canonical_entity_type(value: str | None) -> str | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    if "group" in raw:
+        return "group"
+    if "page" in raw:
+        return "page"
+    if "profile" in raw or "user" in raw:
+        return "profile"
+    return raw if raw in {"profile", "page", "group"} else None
+
+
+def _has_nonempty_line(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return any(bool(line.strip()) for line in file)
+    except OSError:
+        return False
+
+
+def _has_previous_crawl_artifacts(base_path: Path) -> bool:
+    posts_path = base_path / "posts_all.ndjson"
+    checkpoint_path = base_path / "checkpoint.json"
+    info_paths = (
+        base_path / "page_info.json",
+        base_path / "profile_info.json",
+        base_path / "group_info.json",
+    )
+
+    if _has_nonempty_line(posts_path):
+        return True
+    if checkpoint_path.exists() and checkpoint_path.stat().st_size > 0:
+        return True
+    return any(path.exists() and path.stat().st_size > 2 for path in info_paths)
+
+
+def should_run_anonymous_first_for_target(
+    crawl_target: Any,
+    selector_module: str | None,
+    *,
+    data_root: Path | None = None,
+) -> bool:
+    """Return true when a page target has no prior local crawl artifacts."""
+    try:
+        uid_or_url, requested_entity_type, _target_date = _unpack_crawl_target(crawl_target)
+    except Exception:
+        return False
+
+    resolved_entity_type = (
+        _canonical_entity_type(requested_entity_type)
+        or _canonical_entity_type(selector_module)
+    )
+    if resolved_entity_type != "page":
+        return False
+
+    data_root = data_root or (Path(PROJECT_ROOT) / "database")
+    url = _normalize_crawl_url(uid_or_url)
+    url_name = _crawl_storage_name(url)
+    base_path = data_root.resolve() / "page" / url_name
+    return not _has_previous_crawl_artifacts(base_path)
+
+
+def _resolve_anonymous_fallback_login_method(
+    configured_login_method: str,
+    cookies_raw: str,
+) -> str | None:
+    env_value = (
+        os.environ.get("ANONYMOUS_FIRST_FALLBACK_LOGIN_METHOD")
+        or os.environ.get("AUTO_ANONYMOUS_FALLBACK_LOGIN_METHOD")
+        or ""
+    ).strip().lower()
+    if env_value in {"cookies", "profile"}:
+        return env_value
+    if env_value in {"none", "off", "false", "disabled"}:
+        return None
+
+    configured = str(configured_login_method or "").strip().lower()
+    if configured in {"cookies", "profile"}:
+        return configured
+    if str(cookies_raw or "").strip():
+        return "cookies"
+    return "profile"
+
+
+def _to_facebook_host_url(url: str, host: str) -> str:
     raw = str(url or "").strip()
     if not raw:
-        return "https://m.facebook.com/"
+        return f"https://{host}/"
     if "://" not in raw:
-        raw = f"https://www.facebook.com/{raw.lstrip('/')}"
+        stripped = raw.lstrip("/")
+        if stripped.startswith(
+            (
+                "facebook.com/",
+                "www.facebook.com/",
+                "m.facebook.com/",
+                "mbasic.facebook.com/",
+                "web.facebook.com/",
+            )
+        ):
+            raw = f"https://{stripped}"
+        else:
+            raw = f"https://www.facebook.com/{stripped}"
 
     parsed = urlparse(raw)
     if not parsed.netloc:
-        return f"https://m.facebook.com/{raw.lstrip('/')}"
+        return f"https://{host}/{raw.lstrip('/')}"
 
-    return urlunparse(parsed._replace(scheme=parsed.scheme or "https", netloc="m.facebook.com"))
+    return urlunparse(parsed._replace(scheme=parsed.scheme or "https", netloc=host))
+
+
+def _to_mobile_facebook_url(url: str) -> str:
+    return _to_facebook_host_url(url, "m.facebook.com")
+
+
+def _to_mbasic_facebook_url(url: str) -> str:
+    return _to_facebook_host_url(url, "mbasic.facebook.com")
 
 
 def _get_current_user_agent(driver) -> str | None:
@@ -239,20 +403,16 @@ def _get_current_user_agent(driver) -> str | None:
 
 
 def _apply_mobile_browser_profile(driver, mobile_user_agent: str) -> None:
+    try:
+        driver.set_window_size(390, 844)
+    except Exception:
+        pass
     driver.execute_cdp_cmd("Network.enable", {})
-    driver.execute_cdp_cmd(
-        "Network.setUserAgentOverride",
-        {
-            "userAgent": mobile_user_agent,
-            "acceptLanguage": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-            "platform": "Android",
-        },
-    )
     driver.execute_cdp_cmd(
         "Emulation.setDeviceMetricsOverride",
         {
-            "width": 360,
-            "height": 800,
+            "width": 390,
+            "height": 844,
             "deviceScaleFactor": 2,
             "mobile": True,
         },
@@ -262,6 +422,14 @@ def _apply_mobile_browser_profile(driver, mobile_user_agent: str) -> None:
         {
             "enabled": True,
             "maxTouchPoints": 1,
+        },
+    )
+    driver.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {
+            "userAgent": mobile_user_agent,
+            "acceptLanguage": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "platform": "Android",
         },
     )
 
@@ -286,6 +454,88 @@ def _restore_browser_profile(driver, original_user_agent: str | None) -> None:
             )
         except Exception:
             pass
+
+
+def _get_mobile_debug_state(driver) -> Dict[str, Any]:
+    try:
+        state = driver.execute_script(
+            """
+            return {
+              url: window.location.href,
+              host: window.location.hostname,
+              ua: navigator.userAgent || "",
+              width: window.innerWidth || 0,
+              height: window.innerHeight || 0,
+              dpr: window.devicePixelRatio || 0
+            };
+            """
+        )
+    except Exception:
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def _is_mobile_facebook_host(url: str) -> bool:
+    try:
+        host = urlparse(str(url or "")).netloc.lower()
+    except Exception:
+        return False
+    return host in {"m.facebook.com", "mbasic.facebook.com", "touch.facebook.com"}
+
+
+def _visit_mobile_facebook_variant(
+    driver,
+    target_url: str,
+    *,
+    wait_after_load: int,
+    mobile_user_agent: str,
+) -> str:
+    candidates = [
+        # ("m", _to_mobile_facebook_url(target_url)),
+        ("mbasic", _to_mbasic_facebook_url(target_url)),
+    ]
+    last_url = ""
+
+    for label, candidate_url in candidates:
+        logger.info(
+            "[mobile-check] Visiting %s variant url=%s ua=%s",
+            label,
+            candidate_url,
+            mobile_user_agent,
+        )
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        driver.get(candidate_url)
+        wait_for_page_ready(driver, 20)
+        wait_for_seconds(driver, wait_after_load)
+
+        try:
+            last_url = driver.current_url
+        except Exception:
+            last_url = candidate_url
+        state = _get_mobile_debug_state(driver)
+        logger.info(
+            "[mobile-check] variant=%s current_url=%s host=%s viewport=%sx%s dpr=%s ua=%s",
+            label,
+            last_url,
+            state.get("host"),
+            state.get("width"),
+            state.get("height"),
+            state.get("dpr"),
+            state.get("ua"),
+        )
+        if _is_mobile_facebook_host(last_url):
+            return last_url
+
+        logger.warning(
+            "[mobile-check] %s redirected to non-mobile host: %s",
+            label,
+            last_url,
+        )
+
+    return last_url
 
 
 def _page_has_mobile_more_content_prompt(driver) -> bool:
@@ -322,18 +572,22 @@ def _check_mobile_more_content_after_scroll(
     stable_rounds: int = 4,
     pause_seconds: float = 1.2,
 ) -> bool:
-    mobile_url = _to_mobile_facebook_url(page_url)
     desktop_user_agent = original_user_agent or _get_current_user_agent(driver)
     try:
         _apply_mobile_browser_profile(driver, mobile_user_agent)
-        logger.info(
-            "[mobile-check] Visiting %s with mobile user-agent: %s",
-            mobile_url,
-            mobile_user_agent,
+        visited_url = _visit_mobile_facebook_variant(
+            driver,
+            page_url,
+            wait_after_load=wait_after_load,
+            mobile_user_agent=mobile_user_agent,
         )
-        driver.get(mobile_url)
-        wait_for_page_ready(driver, 20)
-        wait_for_seconds(driver, wait_after_load)
+        if not _is_mobile_facebook_host(visited_url):
+            logger.warning(
+                "[mobile-check] Cannot switch to mobile Facebook host for %s; last_url=%s",
+                page_url,
+                visited_url,
+            )
+            return False
 
         prev_height = 0
         stable_count = 0
@@ -349,7 +603,7 @@ def _check_mobile_more_content_after_scroll(
                 height = int(driver.execute_script("return document.body.scrollHeight || 0;") or 0)
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             except Exception as exc:
-                logger.warning("[mobile-check] Scroll failed on %s: %s", mobile_url, exc)
+                logger.warning("[mobile-check] Scroll failed on %s: %s", visited_url, exc)
                 return False
 
             wait_for_seconds(driver, pause_seconds)
@@ -519,7 +773,10 @@ def crawl_urls_batch(
     selector_debug_cfg_profile: Dict[str, Any] | None,
     selector_debug_cfg_page: Dict[str, Any] | None,
     scroll_until_stable_cfg: Dict[str, Any] | None = None,
+    run_generic_selector_after_info: bool = False,
     profile_backup_name: str | None = None,
+    allow_auto_anonymous_first: bool = True,
+    result_callback: Callable[[int, Dict[str, Any]], None] | None = None,
 ) -> List[Tuple[int, Dict[str, Any]]]:
     profile_label = profile_dir or "cookies-session"
     logger.info(
@@ -544,12 +801,21 @@ def crawl_urls_batch(
             debug_port,
             user_agent,
         )
+    default_login_method = str(login_method or "cookies").strip().lower() or "cookies"
+    driver_login_method = default_login_method
+    current_login_method: str | None = None
+    current_cookies_raw: str | None = None
+    current_profile_backup_name: str | None = None
     driver = None
     try:
-        try:
-            driver = create_logged_in_driver(
-                login_method=login_method,
-                cookies_raw=cookies_raw,
+        def open_driver(
+            active_login_method: str,
+            active_cookies_raw: str,
+            active_profile_backup_name: str | None,
+        ):
+            return create_logged_in_driver(
+                login_method=active_login_method,
+                cookies_raw=active_cookies_raw,
                 user_agent=user_agent,
                 headless=headless,
                 profile_dir=profile_dir,
@@ -560,20 +826,74 @@ def crawl_urls_batch(
                 locale_url=fb_locale_url or "https://www.facebook.com/?locale=vi_VN",
                 chrome_binary_win_path=chrome_binary_win_path,
                 chrome_binary_candidates=chrome_binary_candidates,
-                profile_backup_name=profile_backup_name,
+                profile_backup_name=(
+                    active_profile_backup_name
+                    if active_login_method in {"cookies", "profile"}
+                    else None
+                ),
+                early_hook_installer=lambda active_driver: install_early_hook(
+                    active_driver,
+                    keep_last=1000,
+                ),
             )
-        except Exception as exc:
-            logger.error("[worker %s] Login failed: %s", worker_id, exc)
-            return [
-                (
-                    index,
-                    {
-                        "url": _crawl_target_url_for_error(crawl_target),
-                        "error": f"login_failed: {exc}",
-                    },
+
+        def restart_driver(
+            active_login_method: str,
+            active_cookies_raw: str,
+            active_profile_backup_name: str | None,
+        ):
+            nonlocal driver, current_login_method, current_cookies_raw
+            nonlocal current_profile_backup_name, driver_login_method
+            if driver is not None:
+                try:
+                    driver.quit()
+                finally:
+                    terminate_chrome_process(driver)
+                driver = None
+                time.sleep(1)
+            driver = open_driver(
+                active_login_method,
+                active_cookies_raw,
+                active_profile_backup_name,
+            )
+            current_login_method = active_login_method
+            current_cookies_raw = active_cookies_raw
+            current_profile_backup_name = active_profile_backup_name
+            driver_login_method = active_login_method
+            return driver
+
+        def ensure_driver(
+            active_login_method: str,
+            active_cookies_raw: str,
+            active_profile_backup_name: str | None,
+        ):
+            normalized_login_method = (
+                str(active_login_method or "cookies").strip().lower() or "cookies"
+            )
+            normalized_cookies_raw = str(active_cookies_raw or "")
+            normalized_profile_backup_name = (
+                str(active_profile_backup_name).strip()
+                if active_profile_backup_name
+                else None
+            )
+            if (
+                driver is not None
+                and current_login_method == normalized_login_method
+                and current_cookies_raw == normalized_cookies_raw
+                and current_profile_backup_name == normalized_profile_backup_name
+            ):
+                return driver
+            if driver is not None:
+                logger.info(
+                    "[worker %s] Switching browser session to LOGIN_METHOD=%s",
+                    worker_id,
+                    normalized_login_method,
                 )
-                for index, crawl_target in indexed_urls
-            ]
+            return restart_driver(
+                normalized_login_method,
+                normalized_cookies_raw,
+                normalized_profile_backup_name,
+            )
 
         results: List[Tuple[int, Dict[str, Any]]] = []
         for position, (index, crawl_target) in enumerate(indexed_urls):
@@ -583,6 +903,29 @@ def crawl_urls_batch(
             if not str(url).startswith("http"):
                 url = f"https://www.facebook.com/{url}"
             try:
+                explicit_target_login_method = _crawl_target_login_method(crawl_target)
+                target_login_method = explicit_target_login_method or default_login_method
+                target_cookies_raw = _crawl_target_cookies(crawl_target)
+                if target_cookies_raw is None:
+                    target_cookies_raw = cookies_raw
+                target_profile_backup_name = _crawl_target_profile_backup_name(crawl_target)
+                if target_profile_backup_name is None:
+                    target_profile_backup_name = profile_backup_name
+                target_auto_anonymous_first = _crawl_target_auto_anonymous_first(crawl_target)
+                if (
+                    allow_auto_anonymous_first
+                    and explicit_target_login_method is None
+                    and target_login_method != "anonymous"
+                    and should_run_anonymous_first_for_target(crawl_target, selector_module)
+                ):
+                    target_login_method = "anonymous"
+                    target_auto_anonymous_first = True
+                    logger.info(
+                        "[worker %s] Fanpage target has no previous crawl; using anonymous first for %s",
+                        worker_id,
+                        url,
+                    )
+
                 from src.utils.task_flow import precheck_facebook_uid
                 status, reason, checked_url = precheck_facebook_uid(
                     url, timeout=5.0, user_agent=user_agent
@@ -591,29 +934,88 @@ def crawl_urls_batch(
                 if status in ("invalid", "blocked", "not_found"):
                     logger.warning("[worker %s] Skip %s due to %s: %s", worker_id, url, status, reason)
                     raise RuntimeError(f"precheck_{status}: {reason}")
-                if status == "restricted" and login_method == "anonymous":
-                    logger.warning("[worker %s] Skip %s because anonymous mode cannot view restricted page", worker_id, url)
-                    raise RuntimeError(f"precheck_{status}: login_required")
+                if status == "restricted" and target_login_method == "anonymous":
+                    fallback_login_method = (
+                        _resolve_anonymous_fallback_login_method(
+                            default_login_method,
+                            target_cookies_raw,
+                        )
+                        if target_auto_anonymous_first
+                        else None
+                    )
+                    if fallback_login_method:
+                        logger.warning(
+                            "[worker %s] Anonymous cannot view %s (%s); retrying with LOGIN_METHOD=%s",
+                            worker_id,
+                            url,
+                            reason,
+                            fallback_login_method,
+                        )
+                        target_login_method = fallback_login_method
+                    else:
+                        logger.warning(
+                            "[worker %s] Skip %s because anonymous mode cannot view restricted page",
+                            worker_id,
+                            url,
+                        )
+                        raise RuntimeError(f"precheck_{status}: login_required")
+
+                try:
+                    ensure_driver(
+                        target_login_method,
+                        target_cookies_raw,
+                        target_profile_backup_name,
+                    )
+                except Exception as login_exc:
+                    if target_auto_anonymous_first and target_login_method == "anonymous":
+                        fallback_login_method = _resolve_anonymous_fallback_login_method(
+                            default_login_method,
+                            target_cookies_raw,
+                        )
+                        if fallback_login_method:
+                            logger.warning(
+                                "[worker %s] Anonymous driver failed for %s (%s); retrying with LOGIN_METHOD=%s",
+                                worker_id,
+                                url,
+                                login_exc,
+                                fallback_login_method,
+                            )
+                            try:
+                                ensure_driver(
+                                    fallback_login_method,
+                                    target_cookies_raw,
+                                    target_profile_backup_name,
+                                )
+                            except Exception as fallback_exc:
+                                raise RuntimeError(
+                                    f"anonymous_fallback_login_failed: {fallback_exc}"
+                                ) from fallback_exc
+                        else:
+                            raise RuntimeError(f"login_failed: {login_exc}") from login_exc
+                    else:
+                        raise RuntimeError(f"login_failed: {login_exc}") from login_exc
                 
                 url_name = str(url).split('/')[-1].split('?')[0]
                 if not url_name: url_name = str(url)
 
                 resolved_entity_type = requested_entity_type or selector_module
+                target_loaded_before_timeline = False
                 logger.info(
                     "[worker %s] Resolved entity type for %s: %s",
                     worker_id,
                     url,
                     resolved_entity_type or "unknown",
                 )
-                install_early_hook(driver, keep_last=350)
                 if (
                     resolved_entity_type not in {"profile", "page", "group"}
                     and elements_cfg_profile is not None
                     and elements_cfg_page is not None
                 ):
+                    install_early_hook(driver, keep_last=1000)
                     driver.get(url)
                     wait_for_page_ready(driver, 20)
                     wait_for_seconds(driver, wait_after_load)
+                    target_loaded_before_timeline = True
                     resolved_entity_type = _detect_entity_type_from_dom(driver)
                     logger.info(
                         "[worker %s] DOM fallback resolved %s as %s",
@@ -624,6 +1026,7 @@ def crawl_urls_batch(
 
                 profile_data = None
                 page_info_data = None
+                group_info_data = None
                 # Compute output paths only after entity type resolution so
                 # checkpoints and dumps land under the correct directory.
                 data_root = str(Path(PROJECT_ROOT) / "database")
@@ -634,6 +1037,8 @@ def crawl_urls_batch(
                 profile_info_path = database_path / "profile_info.json"
                 page_info_path = database_path / "page_info.json"
                 group_info_path = database_path / "group_info.json"
+                seen_ids = set()
+                ts_state = {"latest": None, "earliest": None}
 
                 if resolved_entity_type == "profile":
                     profile_data = scrape_full_profile_info(
@@ -642,46 +1047,7 @@ def crawl_urls_batch(
                         profile_info_path,
                         scroll_until_stable_cfg=scroll_until_stable_cfg,
                     )
-                    # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
-                    # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
-                    driver.get(url)
-                    wait_for_page_ready(driver, 20)
-                    wait_for_seconds(driver, wait_after_load)
-                    flush_gql_recs(driver)
-
-                    seen_ids = set()
-                    ts_state = {"latest": None, "earliest": None}
-
-                    crawl_scroll_loop(
-                        driver,
-                        group_url=url,
-                        out_path=out_ndjson,
-                        seen_ids=seen_ids,
-                        keep_last=350,
-                        max_scrolls=10000,
-                        ts_state=ts_state,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
-                    )
-
-                    if ts_state["latest"] is not None:
-                        save_checkpoint(checkpoint, ts_state["latest"])
-                    
-                    posts_data = []
-                    if out_ndjson.exists():
-                        try:
-                            import json
-                            with open(out_ndjson, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if line:
-                                        posts_data.append(json.loads(line))
-                        except Exception as e:
-                            logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
-
                     data["profile_info"] = profile_data
-                    data["posts"] = posts_data
-                    data["posts_collected"] = len(seen_ids)
-                    # page_data["output_ndjson"] = str(out_ndjson)
                 elif resolved_entity_type == "page":
                     try:
                         from src.fbprofile.browser.get_page_info import scrape_full_page_info
@@ -695,46 +1061,7 @@ def crawl_urls_batch(
                         page_info_path,
                         scroll_until_stable_cfg=scroll_until_stable_cfg,
                     )
-                    # Các scraper info thường kết thúc ở tab phụ như about/photos/followers.
-                    # Quay lại timeline gốc trước khi chạy lọc ngày + scroll bắt GraphQL bài viết.
-                    driver.get(url)
-                    wait_for_page_ready(driver, 20)
-                    wait_for_seconds(driver, wait_after_load)
-                    flush_gql_recs(driver)
-
-                    seen_ids = set()
-                    ts_state = {"latest": None, "earliest": None}
-
-                    crawl_scroll_loop(
-                        driver,
-                        group_url=url,
-                        out_path=out_ndjson,
-                        seen_ids=seen_ids,
-                        keep_last=350,
-                        max_scrolls=10000,
-                        ts_state=ts_state,
-                        scroll_until_stable_cfg=scroll_until_stable_cfg,
-                    )
-
-                    if ts_state["latest"] is not None:
-                        save_checkpoint(checkpoint, ts_state["latest"])
-                    
-                    posts_data = []
-                    if out_ndjson.exists():
-                        try:
-                            import json
-                            with open(out_ndjson, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if line:
-                                        posts_data.append(json.loads(line))
-                        except Exception as e:
-                            logger.warning("[worker %s] Lỗi đọc file posts nsjson: %s", worker_id, e)
-
-                    
-                    data["page_info"] = page_data
-                    data["posts"] = posts_data
-                    data["posts_collected"] = len(seen_ids)
+                    data["page_info"] = page_info_data
 
                 elif resolved_entity_type == "group":
                     try:
@@ -743,7 +1070,7 @@ def crawl_urls_batch(
                         raise RuntimeError(
                             "Missing page scraper: src.fbprofile.browser.get_page_info"
                         ) from exc
-                    group_data = scrape_full_group_info(
+                    group_info_data = scrape_full_group_info(
                         driver,
                         url,
                         group_info_path,
@@ -751,29 +1078,76 @@ def crawl_urls_batch(
                         photo_limit=2,
                         scroll_until_stable_cfg=scroll_until_stable_cfg,
                     )
-                    data["group_info"] = group_data
+                    data["group_info"] = group_info_data
                 else:
                     logger.info(
                         "[worker %s] Skipping specialized profile/page scraper for %s",
                         worker_id,
                         url,
                     )
-                page_data = crawl_page(
-                    driver,
-                    url,
-                    resolved_entity_type,
-                    elements_cfg,
-                    elements_cfg_profile,
-                    elements_cfg_page,
-                    wait_after_load,
-                    element_timeout,
-                    default_wait_cfg,
-                    default_wait_cfg_profile,
-                    default_wait_cfg_page,
-                    selector_debug_cfg,
-                    selector_debug_cfg_profile,
-                    selector_debug_cfg_page,
+                driver.get(url)
+                wait_for_page_ready(driver, 20)
+                if target_loaded_before_timeline and target_date is None:
+                    drain_pending_gql_records(
+                        driver,
+                        group_url=url,
+                        out_path=out_ndjson,
+                        seen_ids=seen_ids,
+                        log_prefix="#info",
+                        ts_state=ts_state,
+                    )
+                else:
+                    flush_gql_recs(driver)
+                run_generic_selector = (
+                    run_generic_selector_after_info
+                    or resolved_entity_type not in {"profile", "page", "group"}
                 )
+                if run_generic_selector:
+                    page_data = crawl_page(
+                        driver,
+                        url,
+                        resolved_entity_type,
+                        elements_cfg,
+                        elements_cfg_profile,
+                        elements_cfg_page,
+                        wait_after_load,
+                        element_timeout,
+                        default_wait_cfg,
+                        default_wait_cfg_profile,
+                        default_wait_cfg_page,
+                        selector_debug_cfg,
+                        selector_debug_cfg_profile,
+                        selector_debug_cfg_page,
+                    )
+                    target_loaded_before_timeline = True
+                else:
+                    logger.info(
+                        "[worker %s] Skip generic selectors after specialized %s scraper for %s",
+                        worker_id,
+                        resolved_entity_type,
+                        url,
+                    )
+                    page_data = {
+                        "url": url,
+                        "resolved_entity_type": resolved_entity_type,
+                    }
+                    install_early_hook(driver, keep_last=350)
+                    driver.get(url)
+                    wait_for_page_ready(driver, 20)
+                    wait_for_seconds(driver, wait_after_load)
+                    target_loaded_before_timeline = True
+                if target_loaded_before_timeline:
+                    if target_date is None:
+                        drain_pending_gql_records(
+                            driver,
+                            group_url=url,
+                            out_path=out_ndjson,
+                            seen_ids=seen_ids,
+                            log_prefix="#load",
+                            ts_state=ts_state,
+                        )
+                    else:
+                        flush_gql_recs(driver)
                 if target_date and "group" not in url:
                     try:
                         go_to_date(driver, target_date)
@@ -783,8 +1157,7 @@ def crawl_urls_batch(
                 elif target_date is None:
                     logger.info("[worker %s] Skip go_to_date for %s: no date provided", worker_id, url)
 
-                seen_ids = set()
-                ts_state = {"latest": None, "earliest": None}
+                install_early_hook(driver, keep_last=350)
 
                 crawl_scroll_loop(
                     driver,
@@ -800,7 +1173,7 @@ def crawl_urls_batch(
                 if ts_state["latest"] is not None:
                     save_checkpoint(checkpoint, ts_state["latest"])
 
-                if resolved_entity_type == "page" and login_method == "anonymous":
+                if resolved_entity_type == "page" and driver_login_method == "anonymous":
                     try:
                         if _check_mobile_more_content_after_scroll(
                             driver,
@@ -868,19 +1241,34 @@ def crawl_urls_batch(
                 page_data["profile_info"] = profile_data
                 if resolved_entity_type == "page":
                     page_data["page_info"] = page_info_data
+                elif resolved_entity_type == "group":
+                    page_data["group_info"] = group_info_data
                 page_data["posts"] = posts_data
                 page_data["posts_collected"] = len(posts_data)
                 page_data["posts_collected_current_run"] = len(seen_ids)
                 page_data["output_ndjson"] = str(out_ndjson)
+                data = page_data
             except Exception as exc:
                 logger.warning("[worker %s] Failed on %s: %s", worker_id, url, exc)
                 data = {"url": url, "error": str(exc)}
 
             results.append((index, data))
+            if result_callback is not None:
+                try:
+                    result_callback(index, data)
+                except Exception as callback_exc:
+                    logger.error(
+                        "[worker %s] Result callback failed for %s: %s",
+                        worker_id,
+                        url,
+                        callback_exc,
+                    )
 
             is_last_page = position == len(indexed_urls) - 1
-            if not is_last_page:
+            if not is_last_page and driver is not None:
                 wait_for_seconds(driver, wait_between_pages)
+            elif not is_last_page and wait_between_pages > 0:
+                time.sleep(wait_between_pages)
         return results
     finally:
         if driver is not None:

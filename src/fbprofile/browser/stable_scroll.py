@@ -11,6 +11,10 @@ DEFAULT_SCROLL_UNTIL_STABLE_CFG: Dict[str, float | int] = {
     "stable_rounds": 3,
     "scroll_pause_seconds": 1.5,
     "settle_pause_seconds": 0.5,
+    "max_items": 0,
+    "max_seconds": 0,
+    "min_new_items": 0,
+    "slow_rounds": 0,
 }
 
 
@@ -32,17 +36,21 @@ def normalize_scroll_until_stable_cfg(
             if value is not None:
                 resolved[key] = value
 
-    try:
-        resolved["max_scrolls"] = max(1, int(resolved["max_scrolls"]))
-    except (TypeError, ValueError):
-        resolved["max_scrolls"] = int(DEFAULT_SCROLL_UNTIL_STABLE_CFG["max_scrolls"])
+    positive_int_keys = ("max_scrolls", "stable_rounds")
+    non_negative_int_keys = ("max_items", "min_new_items", "slow_rounds")
+    for key in positive_int_keys:
+        try:
+            resolved[key] = max(1, int(resolved[key]))
+        except (TypeError, ValueError):
+            resolved[key] = int(DEFAULT_SCROLL_UNTIL_STABLE_CFG[key])
 
-    try:
-        resolved["stable_rounds"] = max(1, int(resolved["stable_rounds"]))
-    except (TypeError, ValueError):
-        resolved["stable_rounds"] = int(DEFAULT_SCROLL_UNTIL_STABLE_CFG["stable_rounds"])
+    for key in non_negative_int_keys:
+        try:
+            resolved[key] = max(0, int(resolved[key]))
+        except (TypeError, ValueError):
+            resolved[key] = int(DEFAULT_SCROLL_UNTIL_STABLE_CFG[key])
 
-    for key in ("scroll_pause_seconds", "settle_pause_seconds"):
+    for key in ("scroll_pause_seconds", "settle_pause_seconds", "max_seconds"):
         try:
             resolved[key] = max(0.0, float(resolved[key]))
         except (TypeError, ValueError):
@@ -77,6 +85,10 @@ def scroll_until_stable(
     stable_rounds_required = int(resolved_cfg["stable_rounds"])
     scroll_pause_seconds = float(resolved_cfg["scroll_pause_seconds"])
     settle_pause_seconds = float(resolved_cfg["settle_pause_seconds"])
+    max_items = int(resolved_cfg["max_items"])
+    max_seconds = float(resolved_cfg["max_seconds"])
+    min_new_items = int(resolved_cfg["min_new_items"])
+    slow_rounds_required = int(resolved_cfg["slow_rounds"])
 
     prev_height = get_scroll_height(driver)
     try:
@@ -85,7 +97,9 @@ def scroll_until_stable(
         prev_count = 0
 
     stable_rounds = 0
+    slow_rounds = 0
     iterations = 0
+    started_at = time.monotonic()
 
     for iteration in range(1, max_scrolls + 1):
         driver.execute_script(scroll_script)
@@ -100,20 +114,34 @@ def scroll_until_stable(
         except Exception:
             current_count = prev_count
 
+        new_items = max(0, current_count - prev_count)
         if current_height <= prev_height and current_count <= prev_count:
             stable_rounds += 1
         else:
             stable_rounds = 0
 
+        if (
+            slow_rounds_required > 0
+            and min_new_items > 0
+            and current_count > 0
+            and new_items <= min_new_items
+        ):
+            slow_rounds += 1
+        else:
+            slow_rounds = 0
+
         logger.info(
-            "%s Scroll #%d/%d height=%d items=%d stable=%d/%d",
+            "%s Scroll #%d/%d height=%d items=%d new=%d stable=%d/%d slow=%d/%d",
             log_prefix,
             iteration,
             max_scrolls,
             current_height,
             current_count,
+            new_items,
             stable_rounds,
             stable_rounds_required,
+            slow_rounds,
+            slow_rounds_required,
         )
 
         iterations = iteration
@@ -132,6 +160,49 @@ def scroll_until_stable(
                 "final_height": current_height,
                 "final_count": current_count,
                 "stopped_due_to_stable": True,
+            }
+        if max_items > 0 and current_count >= max_items:
+            logger.info(
+                "%s Scroll stopped after reaching max_items=%d.",
+                log_prefix,
+                max_items,
+            )
+            return {
+                "iterations": iterations,
+                "stable_rounds": stable_rounds,
+                "final_height": current_height,
+                "final_count": current_count,
+                "stopped_due_to_stable": False,
+                "stopped_due_to_max_items": True,
+            }
+        if max_seconds > 0 and (time.monotonic() - started_at) >= max_seconds:
+            logger.info(
+                "%s Scroll stopped after max_seconds=%.1f.",
+                log_prefix,
+                max_seconds,
+            )
+            return {
+                "iterations": iterations,
+                "stable_rounds": stable_rounds,
+                "final_height": current_height,
+                "final_count": current_count,
+                "stopped_due_to_stable": False,
+                "stopped_due_to_timeout": True,
+            }
+        if slow_rounds_required > 0 and slow_rounds >= slow_rounds_required:
+            logger.info(
+                "%s Scroll stopped after %d slow round(s) with <=%d new item(s).",
+                log_prefix,
+                slow_rounds,
+                min_new_items,
+            )
+            return {
+                "iterations": iterations,
+                "stable_rounds": stable_rounds,
+                "final_height": current_height,
+                "final_count": current_count,
+                "stopped_due_to_stable": False,
+                "stopped_due_to_slow_growth": True,
             }
 
     logger.info(

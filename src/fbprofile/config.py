@@ -12,7 +12,7 @@ POST_URL_RE = re.compile(
     r"""https?://(?:[a-zA-Z0-9\-\.]+\.)?(?:facebook\.com|fb\.watch|fb\.me|fb\.com)/
         (?:
             groups/[^/]+/(?:permalink|posts|videos)/\d+
-          | [A-Za-z0-9.\-]+/posts/\d+
+          | [A-Za-z0-9.\-]+/posts/[A-Za-z0-9_-]+
           | [A-Za-z0-9.\-]+/videos(?:/[^/]+)?/\d+
           | [A-Za-z0-9.\-]+(?:/photos/a\.\d+\.\d+)?/photos/.*?\d+
           | [A-Za-z0-9.\-]+/reel/\d+

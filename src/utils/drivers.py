@@ -9,7 +9,7 @@ import subprocess  # spawn/terminate Chrome process
 import sys  # platform detection
 import time  # retry/sleep timing
 import logging
-from typing import Iterable, List, Optional, Tuple  # type hints
+from typing import Callable, Iterable, List, Optional, Tuple  # type hints
 from urllib.parse import urlparse  # parse URLs for logging/host extraction
 
 from selenium import webdriver  # Selenium driver classes
@@ -71,6 +71,20 @@ def _wait_for_port(port: int, timeout: int = 15) -> bool:
                 return True
         time.sleep(0.5)
     return False
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _terminate_process(proc: subprocess.Popen, timeout: int = 5) -> None:
@@ -249,6 +263,7 @@ def create_local_driver(
 ) -> webdriver.Chrome:
     """Khởi tạo Chrome Driver bằng cách gọi process thật và attach Selenium qua cổng Debug."""
 
+    profile_path = os.path.abspath(os.path.expanduser(profile_path))
     actual_chrome_path = _resolve_chrome_path(
         chrome_binary_path,
         win_default_path=chrome_binary_win_path,
@@ -295,6 +310,30 @@ def create_local_driver(
         print("x,y position",x, y)
         cmd.append(f"--window-position={x},{y}")
 
+    existing_profile_pids = _find_chrome_pids(profile_path, None)
+    if existing_profile_pids:
+        if _env_bool("CHROME_KILL_EXISTING_PROFILE", False):
+            logger.warning(
+                "[DRIVER] Terminating existing Chrome PID(s) using profile %s: %s",
+                profile_path,
+                existing_profile_pids,
+            )
+            _terminate_pids(existing_profile_pids, timeout=5)
+        else:
+            logger.warning(
+                "[DRIVER] Profile dir may be locked by existing Chrome PID(s) %s: %s. "
+                "Close those Chrome windows or set CHROME_KILL_EXISTING_PROFILE=1 for crawler-owned profiles.",
+                existing_profile_pids,
+                profile_path,
+            )
+
+    logger.info(
+        "[DRIVER] Mo Chrome port=%s profile=%s proxy=%s",
+        port,
+        profile_path,
+        "yes" if proxy else "no",
+    )
+
     logger.info(
         "[DRIVER] Mở Chrome tại Port %s | Proxy: %s",
         port,
@@ -317,8 +356,17 @@ def create_local_driver(
     Khi Selenium tự khởi tạo ChromeDriver, trình duyệt thường có nhiều dấu hiệu “automation”.
     Attach qua debug port có thể ít bị phát hiện hơn trong một số trường hợp.
     '''
-    if not _wait_for_port(port):
+    port_timeout = max(5, _env_int("CHROME_DEBUG_PORT_TIMEOUT", 25))
+    if not _wait_for_port(port, timeout=port_timeout):
+        exit_code = proc.poll()
         _terminate_process(proc)
+        logger.error(
+            "[DRIVER] Chrome debug port timeout port=%s timeout=%ss exit_code=%s profile=%s",
+            port,
+            port_timeout,
+            exit_code,
+            profile_path,
+        )
         raise Exception(
             f"Cổng {port} không mở được (Timeout). "
             "Trình duyệt có thể đã bị crash hoặc đang bị khóa bởi tiến trình khác."
@@ -424,6 +472,7 @@ def create_logged_in_driver(
     profile_backup_name: str | None = None,
     window_size: Optional[Tuple[int, int]] = None,
     window_position: Optional[Tuple[int, int]] = None,
+    early_hook_installer: Optional[Callable[[webdriver.Chrome], None]] = None,
 ):
     """Create a driver and verify login via cookies or profile."""
     driver = create_local_driver(
@@ -441,6 +490,13 @@ def create_logged_in_driver(
     )
     print("Create driver done")
     try:
+        if early_hook_installer is not None:
+            try:
+                early_hook_installer(driver)
+                logger.info("[DRIVER] Early browser hook installed before login navigation.")
+            except Exception as exc:
+                logger.warning("[DRIVER] Failed to install early browser hook: %s", exc)
+
         if login_method == "cookies":
             ok = login_facebook_with_cookies(
                 driver,

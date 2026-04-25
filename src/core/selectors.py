@@ -132,6 +132,9 @@ def resolve_locator(locator_cfg: Dict[str, Any]) -> Tuple[str, str]:
         raise ValueError("Locator config must include 'value' (or legacy 'selector').")
 
     key = str(locator_type).strip().lower()
+    if key in {"data-testid", "data_testid", "testid"}:
+        return By.CSS_SELECTOR, f'[data-testid="{value}"]'
+
     if key in {"data", "data-*", "data_attr", "data-attr"}:
         attr, val = _parse_data_locator_value(value)
         if not attr:

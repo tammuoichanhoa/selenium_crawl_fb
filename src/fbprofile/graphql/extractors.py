@@ -428,23 +428,76 @@ def _looks_like_group_post(n: dict) -> bool:
     url = n.get("wwwURL") or n.get("url") or ""
     pid = n.get("id") or ""
     if POST_URL_RE.search(url): return True
+    if _find_first_post_url(n): return True
     if (isinstance(pid, str) and pid.startswith("Uzpf")) or n.get("post_id"): return True
     return False
 
 def _extract_url_digits(url: str) -> Optional[str]:
     if not url: return None
     try:
-        path = urlparse(url).path.lower()
+        parsed = urlparse(url)
+        path = parsed.path
     except:
-        path = url.lower()
-    m = re.search(r"/(?:reel|posts|permalink)/(\d+)", path)
+        parsed = None
+        path = url
+    m = re.search(r"/(?:reel|posts|permalink)/([A-Za-z0-9_-]+)", path)
     if m: return m.group(1)
-    qs = parse_qs(urlparse(url).query)
+    qs = parse_qs(parsed.query if parsed else urlparse(url).query)
     for k in ("fbid","story_fbid","video_id","photo_id","id","v"):
         v = qs.get(k)
-        if v and v[0] and v[0].isdigit():
+        if v and v[0]:
             return v[0]
     return None
+
+def _post_url_rank(url: str) -> Optional[int]:
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        parsed = urlparse(url)
+        path = (parsed.path or "").lower()
+        query = (parsed.query or "").lower()
+    except Exception:
+        path = url.lower()
+        query = ""
+    if "/posts/" in path:
+        return 0
+    if "/permalink/" in path or "/reel/" in path or "/videos/" in path:
+        return 1
+    if path.endswith("/story.php") or "story_fbid=" in query:
+        return 2
+    if path.endswith("/photo.php") or "fbid=" in query or "photo_id=" in query:
+        return 3
+    return None
+
+def _find_first_post_url(n: dict) -> Optional[str]:
+    candidates = []
+    for k, v in _deep_iter(n):
+        if k not in ("wwwURL", "url", "permalink_url", "canonical_url", "href"):
+            continue
+        if not isinstance(v, str):
+            continue
+        url = _clean_url(v)
+        if not url or "facebook.com" not in url:
+            continue
+        if _post_url_rank(url) is not None:
+            candidates.append(url)
+
+    def score(url: str) -> tuple:
+        try:
+            parsed = urlparse(url)
+            query = parsed.query or ""
+        except Exception:
+            query = ""
+        return (
+            _post_url_rank(url) if _post_url_rank(url) is not None else 99,
+            0 if "comment_id=" not in query else 1,
+            0 if "pfbid" in url else 1,
+            len(url),
+        )
+
+    if not candidates:
+        return None
+    return sorted(dict.fromkeys(candidates), key=score)[0]
 
 def _dig_text(o):
     texts = []
@@ -530,16 +583,45 @@ def filter_only_feed_posts(items):
     return keep
 
 
+def _media_container_story_candidate(n: dict) -> Optional[dict]:
+    typename = n.get("__typename") or n.get("typename") or ""
+    is_media = n.get("__isMedia") or typename in ("Photo", "Video", "Reel")
+    if not is_media:
+        return None
+
+    story = n.get("container_story")
+    if not isinstance(story, dict):
+        return None
+
+    candidate = dict(story)
+    if not candidate.get("created_time") and n.get("created_time"):
+        candidate["created_time"] = n.get("created_time")
+    if "image" not in candidate and isinstance(n.get("image"), dict):
+        candidate["image"] = n.get("image")
+    if "comet_photo_renderer" not in candidate and isinstance(n.get("comet_photo_renderer"), dict):
+        candidate["comet_photo_renderer"] = n.get("comet_photo_renderer")
+    return candidate
+
+
 # =========================
 # Post collectors (ưu tiên rid + link + created_time)
 # =========================
 
 def collect_post_summaries(obj, out, group_url):
     if isinstance(obj, dict):
+        media_story = _media_container_story_candidate(obj)
+        if media_story:
+            collect_post_summaries(media_story, out, group_url)
+
         if _looks_like_group_post(obj):
             post_id_api = obj.get("post_id")
             fb_id      = obj.get("id")
-            url        = obj.get("wwwURL") or obj.get("url")
+            url        = obj.get("wwwURL") or obj.get("permalink_url") or obj.get("url")
+            deep_url = _find_first_post_url(obj)
+            direct_rank = _post_url_rank(url)
+            deep_rank = _post_url_rank(deep_url)
+            if deep_url and (direct_rank is None or (deep_rank is not None and deep_rank < direct_rank)):
+                url = deep_url
             url_digits = _extract_url_digits(url)
             rid        = post_id_api or url_digits or fb_id
             author_id, author_name, author_link, avatar, type_label = extract_author(obj)
